@@ -11,8 +11,9 @@ android {
         applicationId = "com.example.voicerec"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "2.0"
+        ndk { abiFilters += "arm64-v8a" }
     }
     signingConfigs {
         getByName("debug") {
@@ -26,7 +27,10 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    kotlinOptions { jvmTarget = "17" }
+    kotlinOptions {
+        jvmTarget = "17"
+        freeCompilerArgs += "-Xskip-metadata-version-check"
+    }
     buildFeatures { compose = true }
 }
 
@@ -39,4 +43,6 @@ dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+    implementation(files("libs/sherpa-onnx-2.0.1.aar"))
+    implementation("org.apache.commons:commons-compress:1.27.1")
 }

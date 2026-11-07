@@ -37,52 +37,86 @@ object RecorderState {
     val lastWatchEvent = MutableStateFlow("nessuno")
 }
 
-/** Archiviazione locale: cartella privata dell'app, nessun cloud. */
+/** Archivio locale cifrato: i file sono leggibili solo da questa app su questo telefono. */
 object Storage {
-    fun dir(c: Context): File =
-        File(c.getExternalFilesDir(null) ?: c.filesDir, "Recordings").apply { mkdirs() }
+    fun dir(c: Context): File = File(c.filesDir, "vault").apply { mkdirs() }
+    fun recTmp(c: Context): File = File(c.noBackupFilesDir, "rec_tmp").apply { mkdirs() }
 
     fun list(c: Context): List<File> =
-        dir(c).listFiles { f -> f.extension == "m4a" }
+        dir(c).listFiles { f -> f.name.endsWith(".m4a.enc") }
             ?.sortedByDescending { it.lastModified() } ?: emptyList()
 
-    /** Copia il file in Download/Registrazioni (visibile in "File"). Ritorna false se non riesce. */
-    fun exportToDownloads(c: Context, f: File): Boolean {
-        if (Build.VERSION.SDK_INT < 29) return false
-        val v = ContentValues().apply {
-            put(MediaStore.MediaColumns.DISPLAY_NAME, f.name)
-            put(MediaStore.MediaColumns.MIME_TYPE, "audio/mp4")
-            put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/Registrazioni")
-        }
-        val uri = c.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, v) ?: return false
-        return try {
-            c.contentResolver.openOutputStream(uri)?.use { out -> f.inputStream().use { it.copyTo(out) } }
-            true
-        } catch (e: Exception) {
-            c.contentResolver.delete(uri, null, null)
-            false
-        }
-    }
+    fun baseName(f: File) = f.name.removeSuffix(".m4a.enc")
+    fun txtEnc(f: File) = File(f.parentFile, baseName(f) + ".txt.enc")
+    private fun metaOf(f: File) = File(f.parentFile, baseName(f) + ".meta")
+    private fun rcvOf(f: File) = File(f.parentFile, baseName(f) + ".rcv")
+    fun isReceived(f: File) = rcvOf(f).exists()
 
-    /** Apre il menu di condivisione di Android (Drive, WhatsApp, email, ecc.). */
-    fun share(c: Context, f: File) {
-        val uri = FileProvider.getUriForFile(c, c.packageName + ".files", f)
-        val send = Intent(Intent.ACTION_SEND)
-            .setType("audio/mp4")
-            .putExtra(Intent.EXTRA_STREAM, uri)
-            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        c.startActivity(Intent.createChooser(send, "Condividi registrazione").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-    }
+    fun durationMs(f: File): Long =
+        try { metaOf(f).readText().trim().toLong() } catch (e: Exception) { 0L }
 
-    fun durationMs(f: File): Long {
+    private fun durationOfPlain(plain: File): Long {
         val m = MediaMetadataRetriever()
         return try {
-            m.setDataSource(f.absolutePath)
+            m.setDataSource(plain.absolutePath)
             m.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
         } catch (e: Exception) {
             0L
         } finally {
             m.release()
+        }
+    }
+
+    fun uniqueBase(c: Context, base: String): String {
+        var b = base
+        var i = 2
+        while (File(dir(c), "$b.m4a.enc").exists()) { b = "$base-$i"; i++ }
+        return b
+    }
+
+    /** Cifra un M4A in chiaro, salva i dati accessori e cancella l'originale. */
+    fun store(c: Context, plain: File, base: String, received: Boolean) {
+        val d = dir(c)
+        val dur = durationOfPlain(plain)
+        Secure.encryptTo(plain, File(d, "$base.m4a.enc"))
+        File(d, "$base.meta").writeText(dur.toString())
+        if (received) File(d, "$base.rcv").writeText("1")
+        Secure.wipe(plain)
+    }
+
+    fun delete(f: File) {
+        f.delete()
+        txtEnc(f).delete()
+        metaOf(f).delete()
+        rcvOf(f).delete()
+    }
+
+    fun rename(f: File, newBase: String): Boolean {
+        val d = f.parentFile ?: return false
+        val old = baseName(f)
+        if (File(d, "$newBase.m4a.enc").exists()) return false
+        for (ext in listOf("m4a.enc", "txt.enc", "meta", "rcv")) {
+            val s = File(d, "$old.$ext")
+            if (s.exists()) s.renameTo(File(d, "$newBase.$ext"))
+        }
+        return true
+    }
+
+    /** Registrazioni rimaste in chiaro per un arresto improvviso: vengono cifrate. */
+    fun recoverLeftovers(c: Context) {
+        recTmp(c).listFiles { x -> x.extension == "m4a" && x.length() > 0 }?.forEach {
+            try { store(c, it, uniqueBase(c, it.nameWithoutExtension), false) } catch (e: Exception) { }
+        }
+    }
+
+    /** Sposta nell'archivio cifrato le registrazioni create dalle versioni precedenti. */
+    fun migrateLegacy(c: Context) {
+        val olds = listOfNotNull(c.getExternalFilesDir(null)?.let { File(it, "Recordings") }, File(c.filesDir, "Recordings"))
+        for (o in olds) {
+            o.listFiles { x -> x.extension == "m4a" }?.forEach {
+                try { store(c, it, uniqueBase(c, it.nameWithoutExtension), false) } catch (e: Exception) { }
+            }
+            o.listFiles()?.forEach { if (it.extension == "txt") it.delete() }
         }
     }
 }
@@ -99,6 +133,7 @@ class RecorderService : Service() {
     }
 
     private var recorder: MediaRecorder? = null
+    private var aac: AacRecorder? = null
     private var file: File? = null
     private var wake: PowerManager.WakeLock? = null
     private var session: MediaSession? = null
@@ -209,20 +244,27 @@ class RecorderService : Service() {
         }
 
         val name = "Rec_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
-        val out = File(Storage.dir(this), "$name.m4a")
-        val r = newRecorder()
-        recorder = r
+        val out = File(Storage.recTmp(this), "$name.m4a")
         file = out
         try {
-            r.setAudioSource(MediaRecorder.AudioSource.MIC)
-            r.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
-            r.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-            r.setAudioChannels(1)
-            r.setAudioSamplingRate(44100)
-            r.setAudioEncodingBitRate(128_000)
-            r.setOutputFile(out.absolutePath)
-            r.prepare()
-            r.start()
+            try {
+                val a = AacRecorder(this, out)
+                a.start()
+                aac = a
+            } catch (e: Exception) {
+                aac = null
+                val r = newRecorder()
+                recorder = r
+                r.setAudioSource(MediaRecorder.AudioSource.MIC)
+                r.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+                r.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+                r.setAudioChannels(1)
+                r.setAudioSamplingRate(16000)
+                r.setAudioEncodingBitRate(48_000)
+                r.setOutputFile(out.absolutePath)
+                r.prepare()
+                r.start()
+            }
 
             wake = (getSystemService(POWER_SERVICE) as PowerManager)
                 .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "voicerec:rec")
@@ -246,6 +288,8 @@ class RecorderService : Service() {
     }
 
     private fun releaseRecorder() {
+        aac?.let { a -> if (!a.stop()) file?.delete() }
+        aac = null
         recorder?.let { r ->
             try {
                 r.stop()
@@ -254,11 +298,20 @@ class RecorderService : Service() {
             }
             r.release()
         }
+        val f = file
         recorder = null
         file = null
         RecorderState.isRecording.value = false
         wake?.let { if (it.isHeld) it.release() }
         wake = null
+        // Il file in chiaro esiste solo qui, nella cartella privata temporanea: lo cifriamo subito.
+        if (f != null && f.exists() && f.length() > 0) {
+            try {
+                Storage.store(this, f, f.nameWithoutExtension, false)
+            } catch (e: Exception) {
+                // resta nella cartella temporanea e viene cifrato al prossimo avvio
+            }
+        }
     }
 
     private fun leave() {
