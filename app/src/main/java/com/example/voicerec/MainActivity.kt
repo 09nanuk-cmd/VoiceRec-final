@@ -7,10 +7,12 @@ import android.media.MediaPlayer
 import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -23,9 +25,12 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -225,6 +230,7 @@ fun App(onToggle: () -> Unit, onArm: (Boolean) -> Unit) {
                 LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     items(files, key = { it.absolutePath }) { f ->
                         val dur = remember(f.absolutePath, f.length()) { Storage.durationMs(f) }
+                        var menu by remember(f.absolutePath) { mutableStateOf(false) }
                         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                             Column(Modifier.weight(1f)) {
                                 Text(f.nameWithoutExtension, style = MaterialTheme.typography.bodyLarge)
@@ -241,8 +247,26 @@ fun App(onToggle: () -> Unit, onArm: (Boolean) -> Unit) {
                                     contentDescription = if (player.playing == f.absolutePath) "Ferma ascolto" else "Ascolta"
                                 )
                             }
-                            IconButton(onClick = { toRename = f }) { Icon(Icons.Default.Edit, "Rinomina") }
-                            IconButton(onClick = { toDelete = f }) { Icon(Icons.Default.Delete, "Elimina") }
+                            Box {
+                                IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, "Altro") }
+                                DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                                    DropdownMenuItem(text = { Text("Salva in Download") }, onClick = {
+                                        menu = false
+                                        val ok = Storage.exportToDownloads(ctx, f)
+                                        Toast.makeText(
+                                            ctx,
+                                            if (ok) "Salvato in Download/Registrazioni" else "Salvataggio non riuscito: usa Condividi",
+                                            Toast.LENGTH_LONG
+                                        ).show()
+                                    })
+                                    DropdownMenuItem(text = { Text("Condividi") }, onClick = {
+                                        menu = false
+                                        Storage.share(ctx, f)
+                                    })
+                                    DropdownMenuItem(text = { Text("Rinomina") }, onClick = { menu = false; toRename = f })
+                                    DropdownMenuItem(text = { Text("Elimina") }, onClick = { menu = false; toDelete = f })
+                                }
+                            }
                         }
                     }
                 }

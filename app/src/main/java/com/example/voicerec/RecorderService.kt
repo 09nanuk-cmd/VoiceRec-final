@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
@@ -14,11 +15,14 @@ import android.media.MediaRecorder
 import android.media.session.MediaSession
 import android.media.session.PlaybackState
 import android.os.Build
+import android.os.Environment
 import android.os.IBinder
 import android.os.PowerManager
 import android.os.SystemClock
+import android.provider.MediaStore
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
+import androidx.core.content.FileProvider
 import kotlinx.coroutines.flow.MutableStateFlow
 import java.io.File
 import java.text.SimpleDateFormat
@@ -41,6 +45,34 @@ object Storage {
     fun list(c: Context): List<File> =
         dir(c).listFiles { f -> f.extension == "m4a" }
             ?.sortedByDescending { it.lastModified() } ?: emptyList()
+
+    /** Copia il file in Download/Registrazioni (visibile in "File"). Ritorna false se non riesce. */
+    fun exportToDownloads(c: Context, f: File): Boolean {
+        if (Build.VERSION.SDK_INT < 29) return false
+        val v = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, f.name)
+            put(MediaStore.MediaColumns.MIME_TYPE, "audio/mp4")
+            put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/Registrazioni")
+        }
+        val uri = c.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, v) ?: return false
+        return try {
+            c.contentResolver.openOutputStream(uri)?.use { out -> f.inputStream().use { it.copyTo(out) } }
+            true
+        } catch (e: Exception) {
+            c.contentResolver.delete(uri, null, null)
+            false
+        }
+    }
+
+    /** Apre il menu di condivisione di Android (Drive, WhatsApp, email, ecc.). */
+    fun share(c: Context, f: File) {
+        val uri = FileProvider.getUriForFile(c, c.packageName + ".files", f)
+        val send = Intent(Intent.ACTION_SEND)
+            .setType("audio/mp4")
+            .putExtra(Intent.EXTRA_STREAM, uri)
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        c.startActivity(Intent.createChooser(send, "Condividi registrazione").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+    }
 
     fun durationMs(f: File): Long {
         val m = MediaMetadataRetriever()
