@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Registratore</string>
+    <string name="tile_label">Registra</string>
+</resources>
