@@ -35,6 +35,8 @@ object RecorderState {
     val startedAt = MutableStateFlow(0L) // SystemClock.elapsedRealtime()
     val armed = MutableStateFlow(false) // modalità orologio attiva
     val lastWatchEvent = MutableStateFlow("nessuno")
+    val denoise = MutableStateFlow(true)
+    val level = MutableStateFlow(0f) // livello del microfono (0..1) per l'indicatore
 }
 
 /** Archivio locale cifrato: i file sono leggibili solo da questa app su questo telefono. */
@@ -248,7 +250,7 @@ class RecorderService : Service() {
         file = out
         try {
             try {
-                val a = AacRecorder(this, out)
+                val a = AacRecorder(this, out, Audio.denoise(this))
                 a.start()
                 aac = a
             } catch (e: Exception) {

@@ -13,7 +13,13 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -103,6 +109,7 @@ import java.util.Locale
 class Actions(
     val toggleRecord: () -> Unit,
     val setArmed: (Boolean) -> Unit,
+    val setDenoise: (Boolean) -> Unit,
     val downloadModel: () -> Unit,
     val transcribe: (File) -> Unit,
     val cancelWork: () -> Unit,
@@ -300,6 +307,45 @@ fun Root(actions: Actions, importUri: Uri?, clearImport: () -> Unit) {
 // ---------------- schermata principale ----------------
 
 @Composable
+fun HeroCard(content: @Composable ColumnScope.() -> Unit) {
+    val c1 = MaterialTheme.colorScheme.primaryContainer
+    val c2 = MaterialTheme.colorScheme.surfaceContainerHigh
+    Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(32.dp)).background(Brush.verticalGradient(listOf(c1, c2)))) {
+        Column(Modifier.fillMaxWidth().padding(20.dp), horizontalAlignment = Alignment.CenterHorizontally, content = content)
+    }
+}
+
+/** Barre animate che mostrano il livello della voce mentre registri. */
+@Composable
+fun LevelBars(levels: List<Float>, color: Color, modifier: Modifier = Modifier) {
+    Canvas(modifier) {
+        val n = levels.size
+        if (n == 0) return@Canvas
+        val gap = 4.dp.toPx()
+        val w = (size.width - gap * (n - 1)) / n
+        for (i in 0 until n) {
+            val h = size.height * levels[i].coerceIn(0.06f, 1f)
+            drawRoundRect(
+                color = color,
+                topLeft = Offset(i * (w + gap), (size.height - h) / 2f),
+                size = Size(w, h),
+                cornerRadius = CornerRadius(w / 2f, w / 2f)
+            )
+        }
+    }
+}
+
+@Composable
+fun Chip(text: String) {
+    Surface(shape = RoundedCornerShape(50), color = MaterialTheme.colorScheme.secondaryContainer) {
+        Text(
+            text, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSecondaryContainer,
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 3.dp)
+        )
+    }
+}
+
+@Composable
 fun RecordButton(recording: Boolean, onClick: () -> Unit) {
     val inf = rememberInfiniteTransition(label = "pulse")
     val scale by inf.animateFloat(
@@ -310,7 +356,8 @@ fun RecordButton(recording: Boolean, onClick: () -> Unit) {
     val err = MaterialTheme.colorScheme.error
     Box(Modifier.size(190.dp), contentAlignment = Alignment.Center) {
         if (recording) {
-            Box(Modifier.size(150.dp).scale(scale).clip(CircleShape).background(err.copy(alpha = 0.2f)))
+            Box(Modifier.size(172.dp).scale(scale).clip(CircleShape).background(err.copy(alpha = 0.10f)))
+            Box(Modifier.size(146.dp).scale(scale).clip(CircleShape).background(err.copy(alpha = 0.20f)))
         }
         Box(
             Modifier.size(124.dp).clip(CircleShape)
@@ -364,13 +411,16 @@ fun RecordingCard(
             }
             Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
                 Text(displayName(Storage.baseName(f)), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                val extra = buildList {
-                    add(fmt(dur))
-                    add("%.1f MB".format(f.length() / 1048576.0))
-                    if (hasTxt) add("Trascritto")
-                    if (received) add("Ricevuto")
-                }.joinToString("  ·  ")
-                Text(extra, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(
+                    fmt(dur) + "  ·  " + "%.1f MB".format(f.length() / 1048576.0),
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                if (hasTxt || received) {
+                    Row(Modifier.padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        if (hasTxt) Chip("Trascritto")
+                        if (received) Chip("Ricevuto")
+                    }
+                }
             }
             Box {
                 IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, "Altro") }
@@ -399,6 +449,8 @@ fun Home(actions: Actions, importUri: Uri?, clearImport: () -> Unit, onChangePin
     val started by RecorderState.startedAt.collectAsStateWithLifecycle()
     val armed by RecorderState.armed.collectAsStateWithLifecycle()
     val lastEvent by RecorderState.lastWatchEvent.collectAsStateWithLifecycle()
+    val denoise by RecorderState.denoise.collectAsStateWithLifecycle()
+    val level by RecorderState.level.collectAsStateWithLifecycle()
     val modelReady by TranscribeState.modelReady.collectAsStateWithLifecycle()
     val downloading by TranscribeState.downloading.collectAsStateWithLifecycle()
     val dlProgress by TranscribeState.downloadProgress.collectAsStateWithLifecycle()
@@ -430,6 +482,20 @@ fun Home(actions: Actions, importUri: Uri?, clearImport: () -> Unit, onChangePin
         elapsed = 0L
     }
 
+    val history = remember { mutableStateListOf<Float>().apply { repeat(40) { add(0f) } } }
+    LaunchedEffect(recording) {
+        if (recording) {
+            while (true) {
+                val v = Math.sqrt((level * 6f).coerceIn(0f, 1f).toDouble()).toFloat()
+                history.removeAt(0)
+                history.add(v)
+                delay(70)
+            }
+        } else {
+            for (i in history.indices) history[i] = 0f
+        }
+    }
+
     LazyColumn(
         Modifier.fillMaxSize().safeDrawingPadding(),
         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
@@ -454,9 +520,14 @@ fun Home(actions: Actions, importUri: Uri?, clearImport: () -> Unit, onChangePin
             }
         }
         item {
-            SectionCard {
+            HeroCard {
                 Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
                     RecordButton(recording) { actions.toggleRecord() }
+                    LevelBars(
+                        history,
+                        if (recording) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.outlineVariant,
+                        Modifier.fillMaxWidth().height(40.dp).padding(horizontal = 8.dp, vertical = 4.dp)
+                    )
                     Text(
                         fmt(elapsed), style = MaterialTheme.typography.displayMedium, fontWeight = FontWeight.Light
                     )
@@ -482,6 +553,23 @@ fun Home(actions: Actions, importUri: Uri?, clearImport: () -> Unit, onChangePin
                         )
                     }
                     Switch(checked = armed, onCheckedChange = actions.setArmed)
+                }
+            }
+        }
+        item {
+            SectionCard {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Solo voci, senza rumore di fondo", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            if (denoise)
+                                "Attivo: toglie rumori e sottofondo e tiene le voci (qualità voce, 16 kHz). Vale dalla prossima registrazione."
+                            else
+                                "Spento: qualità massima (48 kHz) ma con tutto il rumore di fondo. Vale dalla prossima registrazione.",
+                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(checked = denoise, onCheckedChange = actions.setDenoise)
                 }
             }
         }

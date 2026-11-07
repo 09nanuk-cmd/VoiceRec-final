@@ -10,8 +10,15 @@ import android.media.MediaFormat
 import android.media.MediaMuxer
 import android.media.MediaRecorder
 import android.os.Process
+import com.k2fsa.sherpa.onnx.OfflineSpeechDenoiserDpdfNetModelConfig
+import com.k2fsa.sherpa.onnx.OfflineSpeechDenoiserGtcrnModelConfig
+import com.k2fsa.sherpa.onnx.OfflineSpeechDenoiserModelConfig
+import com.k2fsa.sherpa.onnx.OnlineSpeechDenoiser
+import com.k2fsa.sherpa.onnx.OnlineSpeechDenoiserConfig
 import java.io.File
 import java.nio.ByteOrder
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeUnit
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.cos
@@ -20,24 +27,34 @@ import kotlin.math.sqrt
 import kotlin.math.tanh
 
 /**
- * Registra in M4A (AAC-LC) mono a 48 kHz e 128 kbps (qualità alta, circa 57 MB all'ora).
- * - Microfono "non elaborato" (se disponibile): il telefono non scambia le voci lontane per rumore.
- * - Filtro anti-rimbombo a 80 Hz, poi controllo automatico del volume fino a circa +34 dB,
- *   con limitatore morbido: le voci lontane si sentono forti e quelle vicine non distorcono.
+ * Registra in M4A (AAC-LC) mono.
+ *
+ * - denoise = true: 16 kHz a 64 kbps (qualità voce, circa 29 MB all'ora). Il volume delle voci lontane viene
+ *   alzato, poi un modello di intelligenza artificiale (DPDFNet, in tempo reale e sul telefono) toglie rumori
+ *   e sottofondo tenendo le voci; infine un secondo controllo di volume riporta tutto a un livello alto.
+ * - denoise = false: 48 kHz a 128 kbps (qualità massima, circa 57 MB all'ora), con tutto il rumore di fondo.
+ *
+ * Due thread: uno legge il microfono senza mai fermarsi, l'altro elabora e codifica. Se l'elaborazione non
+ * regge il tempo reale, la riduzione del rumore si disattiva da sola e dalla registrazione dopo si passa a un
+ * modello più leggero.
  */
-class AacRecorder(private val ctx: Context, private val outFile: File) {
+class AacRecorder(private val ctx: Context, private val outFile: File, private val denoise: Boolean) {
 
     companion object {
-        const val BITRATE = 128_000
-        private val RATES = intArrayOf(48000, 44100)
+        const val BITRATE_HQ = 128_000
+        const val BITRATE_VOICE = 64_000
+        private const val MAX_QUEUE = 3000 // 60 secondi di audio in attesa
     }
 
     private var sr = 48000
     private var record: AudioRecord? = null
     private var codec: MediaCodec? = null
     private var muxer: MediaMuxer? = null
-    private var thread: Thread? = null
+    private var capThread: Thread? = null
+    private var procThread: Thread? = null
+    private val queue = LinkedBlockingQueue<ShortArray>()
     @Volatile private var running = false
+    @Volatile private var captureDone = false
     @Volatile private var gotData = false
     private var track = -1
     private var muxerStarted = false
@@ -49,9 +66,10 @@ class AacRecorder(private val ctx: Context, private val outFile: File) {
         val sources = if (unprocessed)
             listOf(MediaRecorder.AudioSource.UNPROCESSED, MediaRecorder.AudioSource.MIC)
         else listOf(MediaRecorder.AudioSource.MIC)
+        val rates = if (denoise) intArrayOf(16000) else intArrayOf(48000, 44100)
 
         var rec: AudioRecord? = null
-        search@ for (rate in RATES) {
+        search@ for (rate in rates) {
             val min = AudioRecord.getMinBufferSize(rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
             if (min <= 0) continue
             val size = maxOf(min * 4, rate)
@@ -66,7 +84,7 @@ class AacRecorder(private val ctx: Context, private val outFile: File) {
         try {
             val fmt = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, sr, 1).apply {
                 setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
-                setInteger(MediaFormat.KEY_BIT_RATE, BITRATE)
+                setInteger(MediaFormat.KEY_BIT_RATE, if (denoise) BITRATE_VOICE else BITRATE_HQ)
                 setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 32768)
             }
             val c = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
@@ -81,56 +99,126 @@ class AacRecorder(private val ctx: Context, private val outFile: File) {
             throw e
         }
         running = true
-        thread = Thread { loop() }.also { it.start() }
+        capThread = Thread { captureLoop() }.also { it.start() }
+        procThread = Thread { processLoop() }.also { it.start() }
     }
 
     /** Ferma e chiude il file. Ritorna true se contiene audio. */
     fun stop(): Boolean {
         running = false
-        thread?.join(8000)
+        capThread?.join(3000)
+        procThread?.join(90_000)
         return gotData
     }
 
-    private fun loop() {
+    // ---------- thread 1: lettura del microfono ----------
+
+    private fun captureLoop() {
         Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
         val rec = record ?: return
-        val c = codec ?: return
         val block = sr / 50 // 20 ms
-        val pcm = ShortArray(block)
-        val agc = Agc(sr)
-        var samples = 0L
         try {
             while (running) {
-                val n = rec.read(pcm, 0, block)
+                val buf = ShortArray(block)
+                val n = rec.read(buf, 0, block)
                 if (n < 0) break
                 if (n == 0) continue
-                agc.process(pcm, n)
-                feed(c, pcm, n, samples, false)
-                samples += n
-                drain(c, false)
+                if (queue.size < MAX_QUEUE) queue.offer(if (n == block) buf else buf.copyOf(n))
             }
-            feed(c, pcm, 0, samples, true)
-            drain(c, true)
         } catch (e: Exception) {
             // si salva comunque quello che è stato registrato finora
         } finally {
+            try { rec.stop() } catch (e: Exception) { }
+            captureDone = true
+        }
+    }
+
+    // ---------- thread 2: volume, riduzione rumore, codifica ----------
+
+    private fun createDenoiser(): OnlineSpeechDenoiser? {
+        val mc = OfflineSpeechDenoiserModelConfig(numThreads = 1)
+        when (Audio.level(ctx)) {
+            0 -> mc.dpdfnet = OfflineSpeechDenoiserDpdfNetModelConfig(model = "dpdfnet4.onnx")
+            1 -> mc.gtcrn = OfflineSpeechDenoiserGtcrnModelConfig(model = "gtcrn_simple.onnx")
+            else -> return null
+        }
+        return OnlineSpeechDenoiser(assetManager = ctx.assets, config = OnlineSpeechDenoiserConfig(model = mc))
+    }
+
+    private fun toShorts(f: FloatArray) =
+        ShortArray(f.size) { (f[it] * 32768f).coerceIn(-32768f, 32767f).toInt().toShort() }
+
+    private fun processLoop() {
+        Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
+        val c = codec
+        if (c == null) { cleanup(); return }
+        var den: OnlineSpeechDenoiser? = null
+        if (denoise) den = try { createDenoiser() } catch (e: Throwable) { null }
+        val pre = Agc(sr, 4500f, 50f, 22f, true)
+        val post = Agc(sr, 4500f, 8f, 12f, false)
+        var outSamples = 0L
+        var bypass = false
+        try {
+            while (true) {
+                val blk = queue.poll(100, TimeUnit.MILLISECONDS)
+                if (blk == null) { if (captureDone) break else continue }
+                pre.process(blk, blk.size)
+                if (den != null) {
+                    val lag = queue.size
+                    if (lag > 500) {
+                        if (!bypass) { bypass = true; Audio.slower(ctx) } // troppo lento: salta il filtro e alleggerisci la prossima volta
+                    } else if (lag < 50) {
+                        bypass = false
+                    }
+                }
+                var out = blk
+                if (den != null && !bypass) {
+                    val f = FloatArray(blk.size) { blk[it] / 32768f }
+                    out = toShorts(den.run(f, sr).samples)
+                }
+                outSamples = emit(c, out, post, outSamples)
+            }
+            den?.let { d -> outSamples = emit(c, toShorts(d.flush().samples), post, outSamples) }
+            feed(c, ShortArray(0), 0, outSamples, true)
+            drain(c, true)
+        } catch (e: Throwable) {
+            // si chiude il file con quello che c'è
+        } finally {
+            try { den?.release() } catch (e: Throwable) { }
             cleanup()
         }
     }
 
+    private fun emit(c: MediaCodec, s: ShortArray, post: Agc, start: Long): Long {
+        if (s.isEmpty()) return start
+        post.process(s, s.size)
+        var sum = 0.0
+        for (v in s) sum += (v * v).toDouble()
+        RecorderState.level.value = sqrt(sum / s.size).toFloat() / 32768f
+        feed(c, s, s.size, start, false)
+        drain(c, false)
+        return start + s.size
+    }
+
     private fun feed(c: MediaCodec, pcm: ShortArray, n: Int, startSample: Long, eos: Boolean) {
-        var idx = c.dequeueInputBuffer(10_000)
-        var tries = 0
-        while (idx < 0) {
-            drain(c, false)
-            idx = c.dequeueInputBuffer(10_000)
-            if (++tries > 500) throw IllegalStateException("Codec bloccato")
-        }
-        val bb = c.getInputBuffer(idx)!!
-        bb.clear()
-        if (n > 0) bb.order(ByteOrder.nativeOrder()).asShortBuffer().put(pcm, 0, n)
-        val pts = startSample * 1_000_000L / sr
-        c.queueInputBuffer(idx, 0, n * 2, pts, if (eos) MediaCodec.BUFFER_FLAG_END_OF_STREAM else 0)
+        var off = 0
+        do {
+            val take = minOf(n - off, 8192)
+            var idx = c.dequeueInputBuffer(10_000)
+            var tries = 0
+            while (idx < 0) {
+                drain(c, false)
+                idx = c.dequeueInputBuffer(10_000)
+                if (++tries > 500) throw IllegalStateException("Codec bloccato")
+            }
+            val bb = c.getInputBuffer(idx)!!
+            bb.clear()
+            if (take > 0) bb.order(ByteOrder.nativeOrder()).asShortBuffer().put(pcm, off, take)
+            val last = eos && off + take >= n
+            val pts = (startSample + off) * 1_000_000L / sr
+            c.queueInputBuffer(idx, 0, take * 2, pts, if (last) MediaCodec.BUFFER_FLAG_END_OF_STREAM else 0)
+            off += take
+        } while (off < n)
     }
 
     private fun drain(c: MediaCodec, wait: Boolean): Boolean {
@@ -171,21 +259,26 @@ class AacRecorder(private val ctx: Context, private val outFile: File) {
         try { if (muxerStarted) muxer?.stop() } catch (e: Exception) { gotData = false }
         try { muxer?.release() } catch (e: Exception) { }
         muxer = null
+        RecorderState.level.value = 0f
     }
 
     /**
-     * Filtro passa-alto a 80 Hz + controllo automatico del volume + limitatore morbido.
-     * Il livello del rumore di fondo viene stimato di continuo: il guadagno sale solo quando c'è
-     * davvero un parlato sopra il rumore, e resta fermo nei silenzi (niente fruscio gonfiato).
+     * Controllo automatico del volume con limitatore morbido, più (opzionale) filtro passa-alto a 80 Hz.
+     * Stima di continuo il rumore di fondo: il guadagno sale solo quando c'è parlato sopra il rumore
+     * e resta fermo nei silenzi.
      */
-    private class Agc(sr: Int) {
-        private val target = 4500f       // livello medio voluto (circa -17 dBFS)
-        private val maxGain = 50f        // fino a circa +34 dB
-        private val minGate = 22f
-        private var gain = 6f
+    private class Agc(
+        sr: Int,
+        private val target: Float,
+        private val maxGain: Float,
+        private val minGate: Float,
+        private val hpf: Boolean,
+    ) {
+        private val blk = sr / 50
+        private var gain = if (hpf) 6f else 1f
         private var noise = 200f
+        private val f = FloatArray(blk)
 
-        // biquad passa-alto (Butterworth, 80 Hz)
         private val b0: Double
         private val b1: Double
         private val b2: Double
@@ -195,7 +288,6 @@ class AacRecorder(private val ctx: Context, private val outFile: File) {
         private var x2 = 0.0
         private var y1 = 0.0
         private var y2 = 0.0
-        private val f = FloatArray(sr / 50 + 16)
 
         init {
             val w0 = 2.0 * PI * 80.0 / sr
@@ -218,35 +310,47 @@ class AacRecorder(private val ctx: Context, private val outFile: File) {
         }
 
         fun process(b: ShortArray, n: Int) {
+            var off = 0
+            while (off < n) {
+                val m = minOf(blk, n - off)
+                block(b, off, m)
+                off += m
+            }
+        }
+
+        private fun block(b: ShortArray, off: Int, n: Int) {
             var sum = 0.0
             var peak = 0f
             for (i in 0 until n) {
-                val x = b[i].toDouble()
-                val y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2
-                x2 = x1; x1 = x
-                y2 = y1; y1 = y
-                val v = y.toFloat()
+                val x = b[off + i].toDouble()
+                val v: Float
+                if (hpf) {
+                    val y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2
+                    x2 = x1; x1 = x
+                    y2 = y1; y1 = y
+                    v = y.toFloat()
+                } else {
+                    v = x.toFloat()
+                }
                 f[i] = v
                 sum += (v * v).toDouble()
                 val a = abs(v)
                 if (a > peak) peak = a
             }
             val rms = sqrt(sum / n).toFloat()
-
-            // stima del rumore di fondo: scende subito, risale lentamente
             noise = if (rms < noise) rms else noise + (rms - noise) * 0.001f
             val gate = maxOf(minGate, noise * 1.8f)
 
             val old = gain
             if (rms > gate) {
-                val desired = (target / rms).coerceIn(1f, maxGain)
+                val desired = (target / rms).coerceIn(if (hpf) 1f else 0.5f, maxGain)
                 gain += (desired - gain) * (if (desired < gain) 0.5f else 0.06f)
             }
             if (peak > 0f && peak * gain > 30000f) gain = 30000f / peak
             val startGain = if (gain < old) gain else old
             for (i in 0 until n) {
                 val g = startGain + (gain - startGain) * (i + 1) / n
-                b[i] = soft(f[i] * g).coerceIn(-32768f, 32767f).toInt().toShort()
+                b[off + i] = soft(f[i] * g).coerceIn(-32768f, 32767f).toInt().toShort()
             }
         }
     }

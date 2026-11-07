@@ -21,6 +21,19 @@ import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.PBEKeySpec
 
+/** Impostazioni audio: riduzione del rumore attiva e livello del modello (0 = migliore, 1 = leggero, 2 = spento). */
+object Audio {
+    private fun p(c: Context) = c.getSharedPreferences("audio", Context.MODE_PRIVATE)
+    fun denoise(c: Context) = p(c).getBoolean("denoise", true)
+    fun setDenoise(c: Context, v: Boolean) {
+        val e = p(c).edit().putBoolean("denoise", v)
+        if (v) e.putInt("dn_level", 0)
+        e.apply()
+    }
+    fun level(c: Context) = p(c).getInt("dn_level", 0)
+    fun slower(c: Context) = p(c).edit().putInt("dn_level", minOf(level(c) + 1, 2)).apply()
+}
+
 object LockState {
     val unlocked = MutableStateFlow(false)
 }

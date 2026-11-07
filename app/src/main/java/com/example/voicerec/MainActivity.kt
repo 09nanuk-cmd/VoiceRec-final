@@ -111,6 +111,7 @@ class MainActivity : ComponentActivity() {
         // niente schermate nelle app recenti né screenshot
         window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
         TranscribeState.modelReady.value = ModelStore.isReady(this)
+        RecorderState.denoise.value = Audio.denoise(this)
         Thread {
             Storage.migrateLegacy(this)
             if (!RecorderState.isRecording.value) Storage.recoverLeftovers(this)
@@ -120,6 +121,7 @@ class MainActivity : ComponentActivity() {
         val actions = Actions(
             toggleRecord = { toggle() },
             setArmed = { setArmed(it) },
+            setDenoise = { Audio.setDenoise(this, it); RecorderState.denoise.value = it },
             downloadModel = { work(TranscribeService.ACTION_DOWNLOAD) },
             transcribe = { work(TranscribeService.ACTION_TRANSCRIBE, it.absolutePath) },
             cancelWork = {
