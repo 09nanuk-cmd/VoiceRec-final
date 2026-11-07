@@ -32,6 +32,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -59,28 +60,30 @@ class MainActivity : ComponentActivity() {
         const val ACTION_START = "com.example.voicerec.START"
     }
 
-    private var pendingStart = false
+    private var pending: Intent? = null
     private var fromTile = false
 
     private val permLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
-            if (pendingStart && hasMic()) startRec()
-            pendingStart = false
+            pending?.let { if (hasMic()) launchService(it) }
+            pending = null
         }
 
     private fun hasMic() =
         ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
             PackageManager.PERMISSION_GRANTED
 
-    private fun startRec() {
-        ContextCompat.startForegroundService(this, Intent(this, RecorderService::class.java))
+    private fun svc(action: String) = Intent(this, RecorderService::class.java).setAction(action)
+
+    private fun launchService(i: Intent) {
+        ContextCompat.startForegroundService(this, i)
         if (fromTile) {
             fromTile = false
             moveTaskToBack(true)
         }
     }
 
-    private fun requestStart() {
+    private fun requestRun(i: Intent) {
         val missing = buildList {
             if (!hasMic()) add(Manifest.permission.RECORD_AUDIO)
             if (Build.VERSION.SDK_INT >= 33 &&
@@ -89,33 +92,36 @@ class MainActivity : ComponentActivity() {
             ) add(Manifest.permission.POST_NOTIFICATIONS)
         }
         if (missing.isEmpty()) {
-            startRec()
+            launchService(i)
         } else {
-            pendingStart = true
+            pending = i
             permLauncher.launch(missing.toTypedArray())
         }
     }
 
     private fun toggle() {
-        if (RecorderState.isRecording.value) {
-            startService(Intent(this, RecorderService::class.java).setAction(RecorderService.ACTION_STOP))
-        } else {
-            requestStart()
-        }
+        if (RecorderState.isRecording.value) startService(svc(RecorderService.ACTION_STOP))
+        else requestRun(svc(RecorderService.ACTION_START))
+    }
+
+    private fun setArmed(on: Boolean) {
+        if (on) requestRun(svc(RecorderService.ACTION_ARM))
+        else startService(svc(RecorderService.ACTION_DISARM))
     }
 
     private fun handle(i: Intent?) {
         if (i != null && i.action == ACTION_START) {
             i.action = null
             fromTile = true
-            if (!RecorderState.isRecording.value) requestStart() else fromTile = false
+            if (!RecorderState.isRecording.value) requestRun(svc(RecorderService.ACTION_START))
+            else fromTile = false
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         handle(intent)
-        setContent { MaterialTheme { App { toggle() } } }
+        setContent { MaterialTheme { App(onToggle = { toggle() }, onArm = { setArmed(it) }) } }
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -161,10 +167,12 @@ fun fmt(ms: Long): String {
 }
 
 @Composable
-fun App(onToggle: () -> Unit) {
+fun App(onToggle: () -> Unit, onArm: (Boolean) -> Unit) {
     val ctx = LocalContext.current
     val recording by RecorderState.isRecording.collectAsStateWithLifecycle()
     val started by RecorderState.startedAt.collectAsStateWithLifecycle()
+    val armed by RecorderState.armed.collectAsStateWithLifecycle()
+    val lastEvent by RecorderState.lastWatchEvent.collectAsStateWithLifecycle()
     var files by remember { mutableStateOf(Storage.list(ctx)) }
     var elapsed by remember { mutableLongStateOf(0L) }
     var toDelete by remember { mutableStateOf<File?>(null) }
@@ -197,6 +205,18 @@ fun App(onToggle: () -> Unit) {
                 colors = if (recording) ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
                 else ButtonDefaults.buttonColors()
             ) { Text(if (recording) "Ferma e salva" else "Avvia registrazione") }
+            Spacer(Modifier.height(12.dp))
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Modalità orologio", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        "Play/pausa dalla schermata Musica dell'orologio avvia e ferma la registrazione.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Text("Ultimo comando ricevuto: $lastEvent", style = MaterialTheme.typography.bodySmall)
+                }
+                Switch(checked = armed, onCheckedChange = onArm)
+            }
             Spacer(Modifier.height(20.dp))
 
             if (files.isEmpty()) {
