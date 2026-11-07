@@ -26,8 +26,6 @@ class MainActivity : ComponentActivity() {
 
     private var pending: Intent? = null
     private var fromTile = false
-    private var wantStart = false
-    private var internalLaunch = false
     private var importUri by mutableStateOf<Uri?>(null)
 
     private val permLauncher =
@@ -66,7 +64,6 @@ class MainActivity : ComponentActivity() {
         if (missing.isEmpty()) {
             launchService(i)
         } else {
-            internalLaunch = true
             pending = i
             permLauncher.launch(missing.toTypedArray())
         }
@@ -88,30 +85,23 @@ class MainActivity : ComponentActivity() {
         ContextCompat.startForegroundService(this, i)
     }
 
-    private fun shareExport(f: File) {
+    private fun shareFile(f: File, mime: String) {
         val uri = FileProvider.getUriForFile(this, "$packageName.files", f)
         val send = Intent(Intent.ACTION_SEND)
-            .setType("application/octet-stream")
+            .setType(mime)
             .putExtra(Intent.EXTRA_STREAM, uri)
             .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        internalLaunch = true
-        startActivity(Intent.createChooser(send, "Condividi file protetto"))
+        startActivity(Intent.createChooser(send, "Condividi"))
     }
 
-    /** Dopo lo sblocco: se arriviamo dal tile, avvia la registrazione (il codice è già stato inserito). */
-    private fun afterUnlock() {
-        if (wantStart) {
-            wantStart = false
-            if (!RecorderState.isRecording.value) requestRun(svc(RecorderService.ACTION_START)) else fromTile = false
-        }
-    }
-
+    /** Dal tile: avvia subito la registrazione (il codice non serve per registrare). */
     private fun handle(i: Intent?) {
         if (i != null && i.action == ACTION_START) {
             i.action = null
-            fromTile = true
-            wantStart = true
-            if (LockState.unlocked.value) afterUnlock()
+            if (!RecorderState.isRecording.value) {
+                fromTile = true
+                requestRun(svc(RecorderService.ACTION_START))
+            }
         }
     }
 
@@ -135,28 +125,14 @@ class MainActivity : ComponentActivity() {
             cancelWork = {
                 startService(Intent(this, TranscribeService::class.java).setAction(TranscribeService.ACTION_CANCEL))
             },
-            lockNow = { LockState.unlocked.value = false },
-            pickImport = { internalLaunch = true; picker.launch(arrayOf("*/*")) },
-            shareExport = { shareExport(it) },
+            pickImport = { picker.launch(arrayOf("*/*")) },
+            shareFile = { f, mime -> shareFile(f, mime) },
         )
-        setContent {
-            Root(actions, importUri, { importUri = null }, { afterUnlock() })
-        }
+        setContent { Root(actions, importUri) { importUri = null } }
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         handle(intent)
-    }
-
-    override fun onStart() {
-        super.onStart()
-        internalLaunch = false
-    }
-
-    override fun onStop() {
-        super.onStop()
-        // appena si lascia l'app (o si spegne lo schermo) serve di nuovo il codice
-        if (!internalLaunch && !isChangingConfigurations) LockState.unlocked.value = false
     }
 }

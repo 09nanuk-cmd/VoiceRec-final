@@ -106,9 +106,8 @@ class Actions(
     val downloadModel: () -> Unit,
     val transcribe: (File) -> Unit,
     val cancelWork: () -> Unit,
-    val lockNow: () -> Unit,
     val pickImport: () -> Unit,
-    val shareExport: (File) -> Unit,
+    val shareFile: (File, String) -> Unit,
 )
 
 /** Riproduzione: il file viene decifrato in una cartella temporanea privata e cancellato a fine ascolto. */
@@ -116,6 +115,7 @@ class Player(private val ctx: android.content.Context) {
     var playing by mutableStateOf<String?>(null)
     private var mp: MediaPlayer? = null
     private var tmp: File? = null
+    private var enhancer: android.media.audiofx.LoudnessEnhancer? = null
 
     fun toggle(enc: File) {
         val same = playing == enc.absolutePath
@@ -130,6 +130,14 @@ class Player(private val ctx: android.content.Context) {
                 setOnCompletionListener { stop() }
                 start()
             }
+            try {
+                enhancer = android.media.audiofx.LoudnessEnhancer(mp!!.audioSessionId).apply {
+                    setTargetGain(600)
+                    enabled = true
+                }
+            } catch (e: Exception) {
+                enhancer = null
+            }
             playing = enc.absolutePath
         } catch (e: Exception) {
             stop()
@@ -137,6 +145,8 @@ class Player(private val ctx: android.content.Context) {
     }
 
     fun stop() {
+        try { enhancer?.release() } catch (e: Exception) { }
+        enhancer = null
         mp?.release()
         mp = null
         tmp?.let { Secure.wipe(it) }
@@ -245,7 +255,7 @@ fun PinSetup(onCancel: (() -> Unit)? = null, onDone: (String) -> Unit) {
     var reset by remember { mutableIntStateOf(0) }
     PinPad(
         title = if (first == null) "Crea il tuo codice" else "Conferma il codice",
-        subtitle = "6 cifre. Serve per aprire l'app, ascoltare e avviare ogni registrazione.",
+        subtitle = "6 cifre. Serve per ascoltare le registrazioni e per condividerle.",
         error = err, resetKey = reset, onCancel = onCancel
     ) { p ->
         if (first == null) {
@@ -259,13 +269,13 @@ fun PinSetup(onCancel: (() -> Unit)? = null, onDone: (String) -> Unit) {
 }
 
 @Composable
-fun PinUnlock(onUnlocked: () -> Unit) {
+fun PinCheck(why: String, onCancel: () -> Unit, onOk: () -> Unit) {
     val ctx = LocalContext.current
     var err by remember { mutableStateOf<String?>(null) }
     var reset by remember { mutableIntStateOf(0) }
-    PinPad("Registratore bloccato", "Inserisci il tuo codice", err, reset) { p ->
+    PinPad("Inserisci il codice", why, err, reset, onCancel) { p ->
         when (val r = Pin.verify(ctx, p)) {
-            is Pin.Result.Ok -> onUnlocked()
+            is Pin.Result.Ok -> onOk()
             is Pin.Result.Wrong -> { err = "Codice errato (${r.fails})"; reset++ }
             is Pin.Result.Locked -> { err = "Troppi tentativi: riprova tra ${r.seconds} s"; reset++ }
         }
@@ -273,19 +283,15 @@ fun PinUnlock(onUnlocked: () -> Unit) {
 }
 
 @Composable
-fun Root(actions: Actions, importUri: Uri?, clearImport: () -> Unit, onUnlocked: () -> Unit) {
+fun Root(actions: Actions, importUri: Uri?, clearImport: () -> Unit) {
     val ctx = LocalContext.current
-    val unlocked by LockState.unlocked.collectAsStateWithLifecycle()
-    var hasPin by remember { mutableStateOf(Pin.isSet(ctx)) }
     var changing by remember { mutableStateOf(false) }
-    LaunchedEffect(unlocked) { if (unlocked) onUnlocked() }
     VoiceRecTheme {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-            when {
-                !hasPin -> PinSetup { p -> Pin.set(ctx, p); hasPin = true; LockState.unlocked.value = true }
-                !unlocked -> PinUnlock { LockState.unlocked.value = true }
-                changing -> PinSetup(onCancel = { changing = false }) { p -> Pin.set(ctx, p); changing = false }
-                else -> Home(actions, importUri, clearImport) { changing = true }
+            if (changing) {
+                PinSetup(onCancel = { changing = false }) { p -> Pin.set(ctx, p); changing = false }
+            } else {
+                Home(actions, importUri, clearImport) { changing = true }
             }
         }
     }
@@ -341,6 +347,7 @@ fun RecordingCard(
     onViewTxt: () -> Unit,
     onTranscribe: () -> Unit,
     onExport: () -> Unit,
+    onSharePlain: () -> Unit,
     onRename: () -> Unit,
     onDelete: () -> Unit,
 ) {
@@ -373,7 +380,8 @@ fun RecordingCard(
                         text = { Text(if (hasTxt) "Rifai trascrizione" else "Trascrivi") },
                         onClick = { menu = false; onTranscribe() }
                     )
-                    if (!received) DropdownMenuItem(text = { Text("Condividi (protetto)") }, onClick = { menu = false; onExport() })
+                    if (!received) DropdownMenuItem(text = { Text("Condividi file audio") }, onClick = { menu = false; onSharePlain() })
+                    if (!received) DropdownMenuItem(text = { Text("Condividi protetto (con app)") }, onClick = { menu = false; onExport() })
                     DropdownMenuItem(text = { Text("Rinomina") }, onClick = { menu = false; onRename() })
                     DropdownMenuItem(text = { Text("Elimina") }, onClick = { menu = false; onDelete() })
                 }
@@ -405,6 +413,10 @@ fun Home(actions: Actions, importUri: Uri?, clearImport: () -> Unit, onChangePin
     var toRename by remember { mutableStateOf<File?>(null) }
     var toExport by remember { mutableStateOf<File?>(null) }
     var showTxt by remember { mutableStateOf<File?>(null) }
+    var toSharePlain by remember { mutableStateOf<File?>(null) }
+    var pinWhy by remember { mutableStateOf("") }
+    var pinAction by remember { mutableStateOf<(() -> Unit)?>(null) }
+    fun askPin(why: String, action: () -> Unit) { pinWhy = why; pinAction = action }
     var topMenu by remember { mutableStateOf(false) }
     val files = remember(recording, done, tick) { Storage.list(ctx) }
     val player = remember { Player(ctx) }
@@ -432,12 +444,11 @@ fun Home(actions: Actions, importUri: Uri?, clearImport: () -> Unit, onChangePin
                         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                IconButton(onClick = actions.lockNow) { Icon(Icons.Default.Lock, "Blocca ora") }
                 Box {
                     IconButton(onClick = { topMenu = true }) { Icon(Icons.Default.MoreVert, "Menu") }
                     DropdownMenu(expanded = topMenu, onDismissRequest = { topMenu = false }) {
                         DropdownMenuItem(text = { Text("Importa file protetto") }, onClick = { topMenu = false; actions.pickImport() })
-                        DropdownMenuItem(text = { Text("Cambia codice") }, onClick = { topMenu = false; onChangePin() })
+                        DropdownMenuItem(text = { Text("Cambia codice") }, onClick = { topMenu = false; askPin("per cambiare il codice") { onChangePin() } })
                     }
                 }
             }
@@ -528,7 +539,10 @@ fun Home(actions: Actions, importUri: Uri?, clearImport: () -> Unit, onChangePin
                     playing = player.playing == f.absolutePath,
                     hasTxt = hasTxt,
                     received = Storage.isReceived(f),
-                    onPlay = { player.toggle(f) },
+                    onPlay = {
+                        if (player.playing == f.absolutePath) player.stop()
+                        else askPin("per ascoltare la registrazione") { player.toggle(f) }
+                    },
                     onViewTxt = { showTxt = f },
                     onTranscribe = {
                         when {
@@ -537,7 +551,8 @@ fun Home(actions: Actions, importUri: Uri?, clearImport: () -> Unit, onChangePin
                             else -> actions.transcribe(f)
                         }
                     },
-                    onExport = { toExport = f },
+                    onExport = { askPin("per condividere la registrazione") { toExport = f } },
+                    onSharePlain = { toSharePlain = f },
                     onRename = { toRename = f },
                     onDelete = { toDelete = f },
                 )
@@ -626,7 +641,7 @@ fun Home(actions: Actions, importUri: Uri?, clearImport: () -> Unit, onChangePin
                         scope.launch {
                             val r = withContext(Dispatchers.IO) { runCatching { Exporter.export(ctx, f, p1.toCharArray()) } }
                             busy = false
-                            r.onSuccess { toExport = null; actions.shareExport(it) }
+                            r.onSuccess { toExport = null; actions.shareFile(it, "application/octet-stream") }
                                 .onFailure { err = "Esportazione non riuscita" }
                         }
                     }
@@ -671,6 +686,49 @@ fun Home(actions: Actions, importUri: Uri?, clearImport: () -> Unit, onChangePin
             },
             dismissButton = { TextButton(enabled = !busy, onClick = { clearImport() }) { Text("Annulla") } }
         )
+    }
+
+    toSharePlain?.let { f ->
+        AlertDialog(
+            onDismissRequest = { toSharePlain = null },
+            properties = secureDialog,
+            title = { Text("Condividere il file audio?") },
+            text = {
+                Text(
+                    "Chi lo riceve potrà aprirlo con qualsiasi app, senza codici. " +
+                        "Una volta inviato non posso impedire che lo inoltri a sua volta: " +
+                        "condividilo solo con persone di cui ti fidi."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    toSharePlain = null
+                    askPin("per condividere la registrazione") {
+                        scope.launch {
+                            val r = withContext(Dispatchers.IO) { runCatching { Exporter.exportPlain(ctx, f) } }
+                            r.onSuccess { actions.shareFile(it, "audio/mp4") }
+                                .onFailure { Toast.makeText(ctx, "Condivisione non riuscita", Toast.LENGTH_LONG).show() }
+                        }
+                    }
+                }) { Text("Continua") }
+            },
+            dismissButton = { TextButton(onClick = { toSharePlain = null }) { Text("Annulla") } }
+        )
+    }
+
+    pinAction?.let { act ->
+        Dialog(
+            onDismissRequest = { pinAction = null },
+            properties = DialogProperties(usePlatformDefaultWidth = false, securePolicy = SecureFlagPolicy.SecureOn)
+        ) {
+            Surface(Modifier.fillMaxSize()) {
+                if (!Pin.isSet(ctx)) {
+                    PinSetup(onCancel = { pinAction = null }) { p -> Pin.set(ctx, p); pinAction = null; act() }
+                } else {
+                    PinCheck(pinWhy, onCancel = { pinAction = null }) { pinAction = null; act() }
+                }
+            }
+        }
     }
 
     showTxt?.let { f ->

@@ -171,6 +171,19 @@ object Pin {
 
 /** Condivisione protetta: file .vrec apribile solo con questa app e la frase segreta scelta. */
 object Exporter {
+    /** Copia in chiaro (M4A normale) per la condivisione: si apre con qualsiasi app, ma non si può limitare. */
+    fun exportPlain(c: Context, enc: File): File {
+        val dir = File(c.cacheDir, "exports").apply { mkdirs() }
+        val out = File(dir, Storage.baseName(enc) + ".m4a")
+        try {
+            Secure.decryptTo(enc, out)
+        } catch (e: Exception) {
+            out.delete()
+            throw e
+        }
+        return out
+    }
+
     fun export(c: Context, enc: File, pass: CharArray): File {
         val plain = Secure.decryptToTemp(c, enc, "m4a")
         try {

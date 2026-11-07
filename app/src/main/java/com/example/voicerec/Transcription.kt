@@ -144,6 +144,10 @@ object AudioDecoder {
         var nextOut = 0.0
         var idxIn = 0L
         var prev = 0f
+        val ring = FloatArray(16)
+        var ringL = 0
+        var ringPos = 0
+        var ringSum = 0.0
         try {
             while (!outDone) {
                 if (cancelled()) return
@@ -173,10 +177,17 @@ object AudioDecoder {
                     val sb = ob.order(ByteOrder.nativeOrder()).asShortBuffer()
                     val frames = sb.remaining() / ch
                     val ratio = sr / 16000.0
+                    val taps = Math.max(1, Math.round(ratio).toInt()).coerceAtMost(16)
                     for (fr in 0 until frames) {
                         var sum = 0
                         for (k in 0 until ch) sum += sb.get().toInt()
-                        val cur = (sum / ch) / 32768f
+                        val mono = (sum / ch) / 32768f
+                        // media mobile: semplice filtro anti-aliasing prima di scendere a 16 kHz
+                        if (taps != ringL) { java.util.Arrays.fill(ring, 0f); ringL = taps; ringPos = 0; ringSum = 0.0 }
+                        ringSum += (mono - ring[ringPos]).toDouble()
+                        ring[ringPos] = mono
+                        ringPos = (ringPos + 1) % ringL
+                        val cur = (ringSum / ringL).toFloat()
                         while (nextOut <= idxIn) {
                             val frac = (nextOut - (idxIn - 1)).toFloat()
                             out[outN++] = prev + (cur - prev) * frac
