@@ -262,7 +262,7 @@ class RecorderService : Service() {
                 r.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
                 r.setAudioChannels(1)
                 r.setAudioSamplingRate(44100)
-                r.setAudioEncodingBitRate(128_000)
+                r.setAudioEncodingBitRate(64_000)
                 r.setOutputFile(out.absolutePath)
                 r.prepare()
                 r.start()

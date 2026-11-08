@@ -41,8 +41,8 @@ import kotlin.math.tanh
 class AacRecorder(private val ctx: Context, private val outFile: File, private val denoise: Boolean) {
 
     companion object {
-        const val BITRATE_HQ = 128_000
-        const val BITRATE_VOICE = 64_000
+        const val BITRATE_HQ = 64_000
+        const val BITRATE_VOICE = 32_000
         private const val MAX_QUEUE = 3000 // 60 secondi di audio in attesa
     }
 
