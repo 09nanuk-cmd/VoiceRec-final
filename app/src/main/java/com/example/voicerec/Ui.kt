@@ -13,7 +13,10 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import android.os.PowerManager
 import androidx.compose.foundation.Canvas
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.compose.foundation.background
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
@@ -110,6 +113,7 @@ class Actions(
     val toggleRecord: () -> Unit,
     val setArmed: (Boolean) -> Unit,
     val setDenoise: (Boolean) -> Unit,
+    val batteryExempt: () -> Unit,
     val downloadModel: () -> Unit,
     val transcribe: (File) -> Unit,
     val cancelWork: () -> Unit,
@@ -460,6 +464,8 @@ fun Home(actions: Actions, importUri: Uri?, clearImport: () -> Unit, onChangePin
     val done by TranscribeState.doneCounter.collectAsStateWithLifecycle()
 
     var tick by remember { mutableIntStateOf(0) }
+    var txtVersion by remember { mutableIntStateOf(0) }
+    var exempt by remember { mutableStateOf(true) }
     var elapsed by remember { mutableLongStateOf(0L) }
     var toDelete by remember { mutableStateOf<File?>(null) }
     var toRename by remember { mutableStateOf<File?>(null) }
@@ -472,6 +478,9 @@ fun Home(actions: Actions, importUri: Uri?, clearImport: () -> Unit, onChangePin
     var topMenu by remember { mutableStateOf(false) }
     val files = remember(recording, done, tick) { Storage.list(ctx) }
     val player = remember { Player(ctx) }
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
+        exempt = ctx.getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(ctx.packageName)
+    }
 
     DisposableEffect(Unit) { onDispose { player.stop() } }
     LaunchedEffect(recording, started) {
@@ -544,13 +553,16 @@ fun Home(actions: Actions, importUri: Uri?, clearImport: () -> Unit, onChangePin
                     Column(Modifier.weight(1f)) {
                         Text("Comando dall'orologio", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                         Text(
-                            "Play/pausa dalla schermata Musica dell'orologio avvia e ferma la registrazione.",
+                            "Sempre attivo, anche con l'app chiusa dalle schede recenti: play/pausa dalla schermata Musica dell'orologio avvia e ferma la registrazione.",
                             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         Text(
                             "Ultimo comando ricevuto: $lastEvent",
                             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+                        if (armed && !exempt) {
+                            TextButton(onClick = actions.batteryExempt) { Text("Evita che Android chiuda l'app") }
+                        }
                     }
                     Switch(checked = armed, onCheckedChange = actions.setArmed)
                 }
@@ -821,9 +833,12 @@ fun Home(actions: Actions, importUri: Uri?, clearImport: () -> Unit, onChangePin
 
     showTxt?.let { f ->
         val received = Storage.isReceived(f)
-        val content = remember(f.absolutePath, done) {
+        val content = remember(f.absolutePath, done, txtVersion) {
             try { Secure.readText(Storage.txtEnc(f)) } catch (e: Exception) { "Impossibile leggere la trascrizione." }
         }
+        var editing by remember(f) { mutableStateOf(false) }
+        var draft by remember(f, txtVersion) { mutableStateOf(content) }
+        val learnedCount = remember(txtVersion) { Learned.count(ctx) }
         Dialog(
             onDismissRequest = { showTxt = null },
             properties = DialogProperties(usePlatformDefaultWidth = false, securePolicy = SecureFlagPolicy.SecureOn)
@@ -831,23 +846,56 @@ fun Home(actions: Actions, importUri: Uri?, clearImport: () -> Unit, onChangePin
             Surface(Modifier.fillMaxSize()) {
                 Column(Modifier.safeDrawingPadding().padding(16.dp)) {
                     Text(displayName(Storage.baseName(f)), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                    if (!received) {
+                        Text(
+                            "Correggi le parole sbagliate: l'app impara dalle tue correzioni e le userà nelle prossime " +
+                                "trascrizioni (correzioni imparate: $learnedCount). Non cambiare il numero di righe.",
+                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                     Row {
-                        if (!received) {
+                        if (!received && !editing) {
                             TextButton(onClick = {
                                 val cm = ctx.getSystemService(ClipboardManager::class.java)
                                 cm.setPrimaryClip(ClipData.newPlainText("trascrizione", content))
                                 Toast.makeText(ctx, "Testo copiato", Toast.LENGTH_SHORT).show()
                             }) { Text("Copia") }
+                            TextButton(onClick = { draft = content; editing = true }) { Text("Correggi") }
+                        }
+                        if (editing) {
+                            TextButton(onClick = {
+                                val n = Learned.learn(ctx, content, draft)
+                                try { Secure.writeText(Storage.txtEnc(f), draft) } catch (e: Exception) { }
+                                txtVersion++
+                                editing = false
+                                Toast.makeText(
+                                    ctx,
+                                    when {
+                                        n < 0 -> "Salvato. Per far imparare le correzioni non cambiare il numero di righe"
+                                        n == 0 -> "Salvato"
+                                        else -> "Salvato: imparate $n correzioni"
+                                    },
+                                    Toast.LENGTH_LONG
+                                ).show()
+                            }) { Text("Salva") }
+                            TextButton(onClick = { editing = false }) { Text("Annulla") }
                         }
                         Spacer(Modifier.weight(1f))
                         TextButton(onClick = { showTxt = null }) { Text("Chiudi") }
                     }
                     HorizontalDivider()
-                    Box(Modifier.weight(1f).fillMaxWidth()) {
-                        val body = @Composable {
-                            Text(content, Modifier.verticalScroll(rememberScrollState()).padding(vertical = 8.dp))
+                    if (editing) {
+                        OutlinedTextField(
+                            value = draft, onValueChange = { draft = it },
+                            modifier = Modifier.weight(1f).fillMaxWidth().padding(top = 8.dp)
+                        )
+                    } else {
+                        Box(Modifier.weight(1f).fillMaxWidth()) {
+                            val body = @Composable {
+                                Text(content, Modifier.verticalScroll(rememberScrollState()).padding(vertical = 8.dp))
+                            }
+                            if (received) body() else SelectionContainer { body() }
                         }
-                        if (received) body() else SelectionContainer { body() }
                     }
                 }
             }

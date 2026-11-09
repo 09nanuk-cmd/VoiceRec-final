@@ -32,6 +32,8 @@ object Audio {
     }
     fun level(c: Context) = p(c).getInt("dn_level", 0)
     fun slower(c: Context) = p(c).edit().putInt("dn_level", minOf(level(c) + 1, 2)).apply()
+    fun armed(c: Context) = p(c).getBoolean("armed", false)
+    fun setArmed(c: Context, v: Boolean) = p(c).edit().putBoolean("armed", v).apply()
 }
 
 object LockState {

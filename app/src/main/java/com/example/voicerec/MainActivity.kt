@@ -6,6 +6,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -69,6 +70,14 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun batteryExempt() {
+        try {
+            startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
+        } catch (e: Exception) {
+            startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+        }
+    }
+
     private fun toggle() {
         if (RecorderState.isRecording.value) startService(svc(RecorderService.ACTION_STOP))
         else requestRun(svc(RecorderService.ACTION_START))
@@ -118,9 +127,12 @@ class MainActivity : ComponentActivity() {
             Secure.cleanup(this)
         }.start()
         handle(intent)
+        // comando dall'orologio sempre attivo: se era acceso, si riattiva all'apertura dell'app
+        if (Audio.armed(this) && !RecorderState.armed.value && hasMic()) launchService(svc(RecorderService.ACTION_ARM))
         val actions = Actions(
             toggleRecord = { toggle() },
             setArmed = { setArmed(it) },
+            batteryExempt = { batteryExempt() },
             setDenoise = { Audio.setDenoise(this, it); RecorderState.denoise.value = it },
             downloadModel = { work(TranscribeService.ACTION_DOWNLOAD) },
             transcribe = { work(TranscribeService.ACTION_TRANSCRIBE, it.absolutePath) },

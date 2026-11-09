@@ -228,6 +228,7 @@ object Transcriber {
         var writer: java.io.BufferedWriter? = null
         try {
             val dir = ModelStore.dir(c)
+            val rules = Learned.active(Learned.load(c))
             val cfg = OfflineRecognizerConfig(
                 featConfig = FeatureConfig(sampleRate = 16000, featureDim = 80),
                 modelConfig = OfflineModelConfig(
@@ -269,7 +270,7 @@ object Transcriber {
                 val s = r.createStream()
                 s.acceptWaveform(seg.samples, 16000)
                 r.decode(s)
-                val text = r.getResult(s).text.trim()
+                val text = Learned.apply(rules, r.getResult(s).text.trim())
                 s.release()
                 if (text.isNotEmpty()) {
                     w.write("[" + ts(seg.start / 16000) + "] " + text + "\n\n")

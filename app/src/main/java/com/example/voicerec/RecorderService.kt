@@ -130,6 +130,7 @@ class RecorderService : Service() {
         const val ACTION_STOP = "com.example.voicerec.STOP"
         const val ACTION_ARM = "com.example.voicerec.ARM"
         const val ACTION_DISARM = "com.example.voicerec.DISARM"
+        const val ACTION_MEDIA_KEY = "com.example.voicerec.MEDIA_KEY"
         private const val CHANNEL = "rec"
         private const val NOTIF_ID = 1
     }
@@ -157,9 +158,11 @@ class RecorderService : Service() {
             ACTION_STOP -> stopRecording()
             ACTION_ARM -> arm()
             ACTION_DISARM -> disarm()
+            ACTION_MEDIA_KEY -> mediaKey()
+            null -> { if (Audio.armed(this)) arm() else leave() } // riavvio automatico fatto dal sistema
             else -> startRecording()
         }
-        return START_NOT_STICKY
+        return if (session != null) START_STICKY else START_NOT_STICKY
     }
 
     override fun onDestroy() {
@@ -181,27 +184,55 @@ class RecorderService : Service() {
         if (RecorderState.isRecording.value) stopRecording() else startRecording()
     }
 
-    private fun arm() {
-        if (session != null) return
+    private fun mediaButtonPi(): PendingIntent {
+        val i = Intent(Intent.ACTION_MEDIA_BUTTON).setClass(this, MediaButtonReceiver::class.java)
+        val flags = PendingIntent.FLAG_UPDATE_CURRENT or (if (Build.VERSION.SDK_INT >= 31) PendingIntent.FLAG_MUTABLE else 0)
+        return PendingIntent.getBroadcast(this, 0, i, flags)
+    }
+
+    /** Tasto arrivato dal ricevitore con l'app chiusa: riattiva il servizio e fa partire/fermare la registrazione. */
+    private fun mediaKey() {
         createChannel()
-        val s = MediaSession(this, "VoiceRecWatch")
-        s.setCallback(callback)
-        s.isActive = true
-        session = s
-        RecorderState.armed.value = true
         try {
             goForeground(RecorderState.isRecording.value)
         } catch (e: Exception) {
-            disarm()
+            stopSelf()
+            return
+        }
+        if (session == null) arm()
+        fromWatch("tasto")
+    }
+
+    private fun arm() {
+        createChannel()
+        if (session == null) {
+            val s = MediaSession(this, "VoiceRecWatch")
+            s.setCallback(callback)
+            s.setMediaButtonReceiver(mediaButtonPi())
+            s.isActive = true
+            session = s
+        }
+        RecorderState.armed.value = true
+        Audio.setArmed(this, true)
+        try {
+            goForeground(RecorderState.isRecording.value)
+        } catch (e: Exception) {
+            dropSession() // la scelta dell'utente resta salvata: si riattiverà all'apertura dell'app
+            leave()
             return
         }
         updateSession()
     }
 
-    private fun disarm() {
+    private fun dropSession() {
         session?.let { it.isActive = false; it.release() }
         session = null
         RecorderState.armed.value = false
+    }
+
+    private fun disarm() {
+        Audio.setArmed(this, false)
+        dropSession()
         if (RecorderState.isRecording.value) {
             try { goForeground(true) } catch (e: Exception) { /* continua comunque */ }
         } else {
@@ -235,7 +266,10 @@ class RecorderService : Service() {
     // ---------- registrazione ----------
 
     private fun startRecording() {
-        if (RecorderState.isRecording.value) return
+        if (RecorderState.isRecording.value) {
+            try { goForeground(true) } catch (e: Exception) { }
+            return
+        }
         createChannel()
         recWall = System.currentTimeMillis()
         try {
@@ -336,7 +370,18 @@ class RecorderService : Service() {
     private fun goForeground(recording: Boolean) {
         var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
         if (session != null) type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
-        ServiceCompat.startForeground(this, NOTIF_ID, buildNotification(recording), type)
+        try {
+            ServiceCompat.startForeground(this, NOTIF_ID, buildNotification(recording), type)
+        } catch (e: Exception) {
+            // riavvio dal sistema in background: senza microfono si resta comunque in ascolto dell'orologio
+            if (session != null && !recording) {
+                ServiceCompat.startForeground(
+                    this, NOTIF_ID, buildNotification(false), ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+                )
+            } else {
+                throw e
+            }
+        }
     }
 
     @Suppress("DEPRECATION")
