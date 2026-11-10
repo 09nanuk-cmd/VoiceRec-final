@@ -115,6 +115,7 @@ class Actions(
     val setDenoise: (Boolean) -> Unit,
     val batteryExempt: () -> Unit,
     val openHealthSettings: () -> Unit,
+    val learnWatch: () -> Unit,
     val downloadModel: () -> Unit,
     val transcribe: (File) -> Unit,
     val cancelWork: () -> Unit,
@@ -554,7 +555,7 @@ fun Home(actions: Actions, importUri: Uri?, clearImport: () -> Unit, onChangePin
                     Column(Modifier.weight(1f)) {
                         Text("Comando dall'orologio", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                         Text(
-                            "Sempre attivo, anche con l'app chiusa dalle schede recenti: play/pausa dalla schermata Musica dell'orologio avvia e ferma la registrazione.",
+                            "Solo l'orologio avvia e ferma la registrazione (play/pausa dalla schermata Musica): i tasti delle cuffie vengono ignorati. Funziona anche con l'app chiusa dalle schede recenti.",
                             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         Text(
@@ -566,6 +567,7 @@ fun Home(actions: Actions, importUri: Uri?, clearImport: () -> Unit, onChangePin
                         }
                         if (armed) {
                             TextButton(onClick = actions.openHealthSettings) { Text("Huawei Health: togli i limiti di batteria") }
+                            TextButton(onClick = actions.learnWatch) { Text("Riconosci l'orologio (poi premi il tasto)") }
                         }
                     }
                     Switch(checked = armed, onCheckedChange = actions.setArmed)

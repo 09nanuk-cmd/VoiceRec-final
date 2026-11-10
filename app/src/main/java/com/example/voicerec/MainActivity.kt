@@ -142,6 +142,10 @@ class MainActivity : ComponentActivity() {
             setArmed = { setArmed(it) },
             batteryExempt = { batteryExempt() },
             openHealthSettings = { openHealthSettings() },
+            learnWatch = {
+                Audio.setLearning(this, true)
+                RecorderState.lastWatchEvent.value = "premi ora il tasto sull'orologio..."
+            },
             setDenoise = { Audio.setDenoise(this, it); RecorderState.denoise.value = it },
             downloadModel = { work(TranscribeService.ACTION_DOWNLOAD) },
             transcribe = { work(TranscribeService.ACTION_TRANSCRIBE, it.absolutePath) },
