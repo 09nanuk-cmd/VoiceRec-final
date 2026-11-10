@@ -114,6 +114,7 @@ class Actions(
     val setArmed: (Boolean) -> Unit,
     val setDenoise: (Boolean) -> Unit,
     val batteryExempt: () -> Unit,
+    val openHealthSettings: () -> Unit,
     val downloadModel: () -> Unit,
     val transcribe: (File) -> Unit,
     val cancelWork: () -> Unit,
@@ -562,6 +563,9 @@ fun Home(actions: Actions, importUri: Uri?, clearImport: () -> Unit, onChangePin
                         )
                         if (armed && !exempt) {
                             TextButton(onClick = actions.batteryExempt) { Text("Evita che Android chiuda l'app") }
+                        }
+                        if (armed) {
+                            TextButton(onClick = actions.openHealthSettings) { Text("Huawei Health: togli i limiti di batteria") }
                         }
                     }
                     Switch(checked = armed, onCheckedChange = actions.setArmed)

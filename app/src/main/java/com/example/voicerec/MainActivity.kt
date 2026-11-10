@@ -78,6 +78,14 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun openHealthSettings() {
+        try {
+            startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:com.huawei.health")))
+        } catch (e: Exception) {
+            android.widget.Toast.makeText(this, "Huawei Health non trovata", android.widget.Toast.LENGTH_LONG).show()
+        }
+    }
+
     private fun toggle() {
         if (RecorderState.isRecording.value) startService(svc(RecorderService.ACTION_STOP))
         else requestRun(svc(RecorderService.ACTION_START))
@@ -133,6 +141,7 @@ class MainActivity : ComponentActivity() {
             toggleRecord = { toggle() },
             setArmed = { setArmed(it) },
             batteryExempt = { batteryExempt() },
+            openHealthSettings = { openHealthSettings() },
             setDenoise = { Audio.setDenoise(this, it); RecorderState.denoise.value = it },
             downloadModel = { work(TranscribeService.ACTION_DOWNLOAD) },
             transcribe = { work(TranscribeService.ACTION_TRANSCRIBE, it.absolutePath) },

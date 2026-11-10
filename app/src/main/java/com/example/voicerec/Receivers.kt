@@ -31,9 +31,28 @@ class MediaButtonReceiver : BroadcastReceiver() {
                 c, Intent(c, RecorderService::class.java).setAction(RecorderService.ACTION_MEDIA_KEY)
             )
         } catch (e: Exception) {
-            // Android non ha permesso l'avvio: niente arresto anomalo
+            notifyTapToRecord(c) // Android non ha permesso l'avvio automatico
         }
     }
+}
+
+/** Se Android blocca l'avvio automatico del microfono, basta un tocco su questa notifica per registrare. */
+fun notifyTapToRecord(c: Context) {
+    val nm = c.getSystemService(NotificationManager::class.java)
+    nm.createNotificationChannel(NotificationChannel("alert", "Avvisi", NotificationManager.IMPORTANCE_HIGH))
+    val i = Intent(c, MainActivity::class.java).setAction(MainActivity.ACTION_START).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    val pi = PendingIntent.getActivity(c, 21, i, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+    nm.notify(
+        21,
+        NotificationCompat.Builder(c, "alert")
+            .setSmallIcon(R.drawable.ic_mic)
+            .setContentTitle("Registrazione non partita")
+            .setContentText("Tocca per avviarla subito")
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setAutoCancel(true)
+            .setContentIntent(pi)
+            .build()
+    )
 }
 
 /** Dopo un riavvio del telefono Android non permette di avviare il microfono da solo: avvisa con una notifica. */

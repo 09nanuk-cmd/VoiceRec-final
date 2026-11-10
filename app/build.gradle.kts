@@ -11,8 +11,8 @@ android {
         applicationId = "com.example.voicerec"
         minSdk = 26
         targetSdk = 35
-        versionCode = 7
-        versionName = "2.5"
+        versionCode = 8
+        versionName = "2.6"
         ndk { abiFilters += "arm64-v8a" }
     }
     signingConfigs {

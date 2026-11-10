@@ -9,7 +9,15 @@ import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
+import android.media.AudioFormat
+import android.media.AudioManager
+import android.media.AudioPlaybackConfiguration
+import android.media.AudioTrack
 import android.media.MediaMetadata
+import android.os.Handler
+import android.os.Looper
 import android.media.MediaMetadataRetriever
 import android.media.MediaRecorder
 import android.media.session.MediaSession
@@ -142,6 +150,22 @@ class RecorderService : Service() {
     private var session: MediaSession? = null
     private var recWall = 0L
     private var lastToggle = 0L
+    private var silent: AudioTrack? = null
+    private var silentThread: Thread? = null
+    @Volatile private var silentRun = false
+    private var playbackCb: AudioManager.AudioPlaybackCallback? = null
+    private var lastPlayers = 0
+    private var lastReassert = 0L
+    private var focus: AudioFocusRequest? = null
+    private val handler = Handler(Looper.getMainLooper())
+    private val keepTick = object : Runnable {
+        override fun run() {
+            if (session != null) {
+                if (lastPlayers >= 2) reassert() // altre app stanno suonando: riprendi la priorità del tasto
+                handler.postDelayed(this, 15000)
+            }
+        }
+    }
 
     private val callback = object : MediaSession.Callback() {
         override fun onPlay() = fromWatch("play")
@@ -166,6 +190,8 @@ class RecorderService : Service() {
     }
 
     override fun onDestroy() {
+        stopSilent()
+        unwatchOthers()
         releaseRecorder()
         session?.let { it.isActive = false; it.release() }
         session = null
@@ -184,6 +210,121 @@ class RecorderService : Service() {
         if (RecorderState.isRecording.value) stopRecording() else startRecording()
     }
 
+    // ---------- priorità del tasto dell'orologio e audio degli altri ----------
+
+    /** Riproduce silenzio: Android considera l'app "attiva" e non la mette a dormire con lo schermo spento. */
+    private fun startSilent() {
+        if (silentRun) return
+        try {
+            val rate = 8000
+            val attrs = AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_MEDIA)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                .build()
+            val fmt = AudioFormat.Builder()
+                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                .setSampleRate(rate)
+                .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                .build()
+            val min = AudioTrack.getMinBufferSize(rate, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT)
+            val t = AudioTrack.Builder()
+                .setAudioAttributes(attrs)
+                .setAudioFormat(fmt)
+                .setBufferSizeInBytes(maxOf(min, rate))
+                .setTransferMode(AudioTrack.MODE_STREAM)
+                .build()
+            silent = t
+            t.play()
+            silentRun = true
+            silentThread = Thread {
+                val zeros = ShortArray(800)
+                while (silentRun) {
+                    try { t.write(zeros, 0, zeros.size) } catch (e: Exception) { break }
+                }
+            }.also { it.isDaemon = true; it.start() }
+        } catch (e: Exception) {
+            silentRun = false
+            silent = null
+        }
+    }
+
+    private fun stopSilent() {
+        silentRun = false
+        try { silent?.stop() } catch (e: Exception) { }
+        try { silentThread?.join(500) } catch (e: Exception) { }
+        try { silent?.release() } catch (e: Exception) { }
+        silent = null
+        silentThread = null
+    }
+
+    /** Quando un'altra app inizia a suonare, il tasto multimediale andrebbe a lei: si riprende la priorità. */
+    private fun watchOthers() {
+        if (playbackCb != null) return
+        val am = getSystemService(AudioManager::class.java)
+        val cb = object : AudioManager.AudioPlaybackCallback() {
+            override fun onPlaybackConfigChanged(configs: MutableList<AudioPlaybackConfiguration>?) {
+                val n = configs?.size ?: 0
+                val now = SystemClock.elapsedRealtime()
+                if (n > lastPlayers && n >= 2 && now - lastReassert > 2000) {
+                    lastReassert = now
+                    reassert()
+                }
+                lastPlayers = n
+            }
+        }
+        am.registerAudioPlaybackCallback(cb, handler)
+        playbackCb = cb
+        handler.removeCallbacks(keepTick)
+        handler.postDelayed(keepTick, 15000)
+    }
+
+    private fun unwatchOthers() {
+        handler.removeCallbacks(keepTick)
+        playbackCb?.let {
+            try { getSystemService(AudioManager::class.java).unregisterAudioPlaybackCallback(it) } catch (e: Exception) { }
+        }
+        playbackCb = null
+        lastPlayers = 0
+    }
+
+    private fun reassert() {
+        try { silent?.let { it.pause(); it.play() } } catch (e: Exception) { }
+        session?.let { s ->
+            try {
+                s.setPlaybackState(
+                    PlaybackState.Builder()
+                        .setState(PlaybackState.STATE_SKIPPING_TO_NEXT, PlaybackState.PLAYBACK_POSITION_UNKNOWN, 1f)
+                        .build()
+                )
+            } catch (e: Exception) { }
+        }
+        updateSession()
+    }
+
+    /** Chiede il "focus audio": le altre app (Spotify, YouTube...) si fermano mentre registri. */
+    private fun takeFocus() {
+        try {
+            val am = getSystemService(AudioManager::class.java)
+            val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                .setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                )
+                .setOnAudioFocusChangeListener { }
+                .build()
+            am.requestAudioFocus(req)
+            focus = req
+        } catch (e: Exception) {
+        }
+    }
+
+    private fun dropFocus() {
+        try { focus?.let { getSystemService(AudioManager::class.java).abandonAudioFocusRequest(it) } } catch (e: Exception) { }
+        focus = null
+    }
+
     private fun mediaButtonPi(): PendingIntent {
         val i = Intent(Intent.ACTION_MEDIA_BUTTON).setClass(this, MediaButtonReceiver::class.java)
         val flags = PendingIntent.FLAG_UPDATE_CURRENT or (if (Build.VERSION.SDK_INT >= 31) PendingIntent.FLAG_MUTABLE else 0)
@@ -196,6 +337,7 @@ class RecorderService : Service() {
         try {
             goForeground(RecorderState.isRecording.value)
         } catch (e: Exception) {
+            notifyTapToRecord(this)
             stopSelf()
             return
         }
@@ -212,6 +354,8 @@ class RecorderService : Service() {
             s.isActive = true
             session = s
         }
+        startSilent()
+        watchOthers()
         RecorderState.armed.value = true
         Audio.setArmed(this, true)
         try {
@@ -225,6 +369,8 @@ class RecorderService : Service() {
     }
 
     private fun dropSession() {
+        stopSilent()
+        unwatchOthers()
         session?.let { it.isActive = false; it.release() }
         session = null
         RecorderState.armed.value = false
@@ -307,6 +453,7 @@ class RecorderService : Service() {
                 .also { it.acquire(12 * 60 * 60 * 1000L) }
             RecorderState.startedAt.value = SystemClock.elapsedRealtime()
             RecorderState.isRecording.value = true
+            takeFocus() // Spotify, YouTube e simili vengono messi in pausa
             updateSession()
         } catch (e: Exception) {
             stopRecording()
@@ -340,6 +487,7 @@ class RecorderService : Service() {
         RecorderState.isRecording.value = false
         wake?.let { if (it.isHeld) it.release() }
         wake = null
+        dropFocus()
         // Il file in chiaro esiste solo qui, nella cartella privata temporanea: lo cifriamo subito.
         if (f != null && f.exists() && f.length() > 0) {
             try {
