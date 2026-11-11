@@ -156,12 +156,13 @@ class RecorderService : Service() {
     private var playbackCb: AudioManager.AudioPlaybackCallback? = null
     private var lastPlayers = 0
     private var lastReassert = 0L
+    private var focus: AudioFocusRequest? = null
     private val handler = Handler(Looper.getMainLooper())
     private val keepTick = object : Runnable {
         override fun run() {
             if (session != null) {
-                if (lastPlayers < 2) reassert() // nessun'altra app sta suonando: riprendi la priorità senza disturbare
-                handler.postDelayed(this, 300_000)
+                if (lastPlayers >= 2) reassert() // altre app stanno suonando: riprendi la priorità del tasto
+                handler.postDelayed(this, 15000)
             }
         }
     }
@@ -181,7 +182,7 @@ class RecorderService : Service() {
             ACTION_STOP -> stopRecording()
             ACTION_ARM -> arm()
             ACTION_DISARM -> disarm()
-            ACTION_MEDIA_KEY -> mediaKey(intent?.getStringExtra("sender"))
+            ACTION_MEDIA_KEY -> mediaKey()
             null -> { if (Audio.armed(this)) arm() else leave() } // riavvio automatico fatto dal sistema
             else -> startRecording()
         }
@@ -200,30 +201,9 @@ class RecorderService : Service() {
 
     // ---------- comandi dall'orologio ----------
 
-    private fun senderPackage(): String? =
-        try {
-            if (Build.VERSION.SDK_INT >= 28) session?.currentControllerInfo?.packageName else null
-        } catch (e: Exception) {
-            null
-        }
-
-    private fun fromWatch(name: String, senderOverride: String? = null) {
-        val pkg = senderOverride ?: senderPackage()
-        val time = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
-        if (Audio.learning(this)) {
-            // modalità "riconosci l'orologio": il prossimo comando decide chi è l'orologio
-            if (pkg != null && pkg != packageName) {
-                Audio.setWatchPkg(this, pkg)
-                Audio.setLearning(this, false)
-                RecorderState.lastWatchEvent.value = "orologio riconosciuto: $pkg"
-            }
-            return
-        }
-        if (!Audio.isWatchPkg(this, pkg)) {
-            RecorderState.lastWatchEvent.value = "ignorato (" + (pkg ?: "mittente sconosciuto") + ") " + time
-            return
-        }
-        RecorderState.lastWatchEvent.value = "$name ($pkg) $time"
+    private fun fromWatch(name: String) {
+        RecorderState.lastWatchEvent.value =
+            name + " " + SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
         val now = SystemClock.elapsedRealtime()
         if (now - lastToggle < 1000) return // evita doppi eventi (giù/su del tasto)
         lastToggle = now
@@ -283,13 +263,19 @@ class RecorderService : Service() {
         val am = getSystemService(AudioManager::class.java)
         val cb = object : AudioManager.AudioPlaybackCallback() {
             override fun onPlaybackConfigChanged(configs: MutableList<AudioPlaybackConfiguration>?) {
-                lastPlayers = configs?.size ?: 0
+                val n = configs?.size ?: 0
+                val now = SystemClock.elapsedRealtime()
+                if (n > lastPlayers && n >= 2 && now - lastReassert > 2000) {
+                    lastReassert = now
+                    reassert()
+                }
+                lastPlayers = n
             }
         }
         am.registerAudioPlaybackCallback(cb, handler)
         playbackCb = cb
         handler.removeCallbacks(keepTick)
-        handler.postDelayed(keepTick, 300_000)
+        handler.postDelayed(keepTick, 15000)
     }
 
     private fun unwatchOthers() {
@@ -315,6 +301,30 @@ class RecorderService : Service() {
         updateSession()
     }
 
+    /** Chiede il "focus audio": le altre app (Spotify, YouTube...) si fermano mentre registri. */
+    private fun takeFocus() {
+        try {
+            val am = getSystemService(AudioManager::class.java)
+            val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                .setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                )
+                .setOnAudioFocusChangeListener { }
+                .build()
+            am.requestAudioFocus(req)
+            focus = req
+        } catch (e: Exception) {
+        }
+    }
+
+    private fun dropFocus() {
+        try { focus?.let { getSystemService(AudioManager::class.java).abandonAudioFocusRequest(it) } } catch (e: Exception) { }
+        focus = null
+    }
+
     private fun mediaButtonPi(): PendingIntent {
         val i = Intent(Intent.ACTION_MEDIA_BUTTON).setClass(this, MediaButtonReceiver::class.java)
         val flags = PendingIntent.FLAG_UPDATE_CURRENT or (if (Build.VERSION.SDK_INT >= 31) PendingIntent.FLAG_MUTABLE else 0)
@@ -322,7 +332,7 @@ class RecorderService : Service() {
     }
 
     /** Tasto arrivato dal ricevitore con l'app chiusa: riattiva il servizio e fa partire/fermare la registrazione. */
-    private fun mediaKey(sender: String?) {
+    private fun mediaKey() {
         createChannel()
         try {
             goForeground(RecorderState.isRecording.value)
@@ -332,7 +342,7 @@ class RecorderService : Service() {
             return
         }
         if (session == null) arm()
-        fromWatch("tasto", sender)
+        fromWatch("tasto")
     }
 
     private fun arm() {
@@ -443,6 +453,7 @@ class RecorderService : Service() {
                 .also { it.acquire(12 * 60 * 60 * 1000L) }
             RecorderState.startedAt.value = SystemClock.elapsedRealtime()
             RecorderState.isRecording.value = true
+            takeFocus() // Spotify, YouTube e simili vengono messi in pausa
             updateSession()
         } catch (e: Exception) {
             stopRecording()
@@ -476,6 +487,7 @@ class RecorderService : Service() {
         RecorderState.isRecording.value = false
         wake?.let { if (it.isHeld) it.release() }
         wake = null
+        dropFocus()
         // Il file in chiaro esiste solo qui, nella cartella privata temporanea: lo cifriamo subito.
         if (f != null && f.exists() && f.length() > 0) {
             try {

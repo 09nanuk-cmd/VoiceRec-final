@@ -41,17 +41,52 @@ object Learned {
     fun active(m: Map<String, Rule>): Map<String, String> =
         m.filter { (k, r) -> r.count >= 2 || k.length >= 6 }.mapValues { it.value.value }
 
-    /** Ritorna quante correzioni ha imparato o rafforzato, oppure -1 se il numero di righe non coincide. */
+    private val tsLine = Regex("^\\[(\\d+:\\d\\d(?::\\d\\d)?)\\]\\s*(.*)$")
+
+    private fun tsMap(text: String): Map<String, String> {
+        val m = LinkedHashMap<String, String>()
+        for (line in text.lines()) {
+            val r = tsLine.find(line) ?: continue
+            m[r.groupValues[1]] = r.groupValues[2]
+        }
+        return m
+    }
+
+    fun remove(c: Context, key: String) {
+        val m = load(c)
+        if (m.remove(key) != null) save(c, m)
+    }
+
+    /**
+     * Confronta la trascrizione originale con quella corretta e impara le sostituzioni.
+     * Funziona anche se righe o orari sono cambiati, o se incolli un testo corretto intero.
+     * Ritorna quante correzioni ha imparato o rafforzato, oppure -1 se il testo è troppo lungo per un confronto unico.
+     */
     fun learn(c: Context, oldText: String, newText: String): Int {
-        val ol = oldText.lines()
-        val nl = newText.lines()
-        if (ol.size != nl.size) return -1
+        val pairs = ArrayList<Pair<String, String>>()
+        val om = tsMap(oldText)
+        val nm = tsMap(newText)
+        val common = om.keys.intersect(nm.keys)
+        if (common.isNotEmpty() && common.size * 2 >= om.size) {
+            for (k in common) pairs.add((om[k] ?: "") to (nm[k] ?: ""))
+        } else if (oldText.lines().size == newText.lines().size) {
+            val ol = oldText.lines()
+            val nl = newText.lines()
+            for (i in ol.indices) pairs.add(ol[i] to nl[i])
+        } else {
+            val ws = Regex("\\s+")
+            val wa = oldText.split(ws).count { it.isNotBlank() }
+            val wb = newText.split(ws).count { it.isNotBlank() }
+            if (wa > 3000 || wb > 3000) return -1
+            pairs.add(oldText to newText)
+        }
         val m = load(c)
         var touched = 0
-        for (i in ol.indices) {
-            if (ol[i] == nl[i]) continue
-            val a = ol[i].split(' ').filter { it.isNotBlank() && !stamp.matches(it) }
-            val b = nl[i].split(' ').filter { it.isNotBlank() && !stamp.matches(it) }
+        val ws = Regex("\\s+")
+        for ((o, n) in pairs) {
+            if (o == n) continue
+            val a = o.split(ws).filter { it.isNotBlank() && !stamp.matches(it) }
+            val b = n.split(ws).filter { it.isNotBlank() && !stamp.matches(it) }
             for ((oldBlock, newBlock) in replaceBlocks(a, b)) {
                 val oldJoined = oldBlock.joinToString(" ") { strip(it) }
                 val value = newBlock.joinToString(" ") { strip(it) }

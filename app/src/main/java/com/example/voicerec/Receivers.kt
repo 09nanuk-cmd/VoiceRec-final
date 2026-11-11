@@ -20,11 +20,6 @@ class MediaButtonReceiver : BroadcastReceiver() {
         @Suppress("DEPRECATION")
         val ke = i.getParcelableExtra<KeyEvent>(Intent.EXTRA_KEY_EVENT) ?: return
         if (ke.action != KeyEvent.ACTION_DOWN) return
-        val sender = i.getStringExtra(Intent.EXTRA_PACKAGE_NAME)
-        if (!Audio.isWatchPkg(c, sender)) {
-            RecorderState.lastWatchEvent.value = "ignorato (" + (sender ?: "mittente sconosciuto") + ")"
-            return
-        }
         when (ke.keyCode) {
             KeyEvent.KEYCODE_MEDIA_PLAY, KeyEvent.KEYCODE_MEDIA_PAUSE, KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
             KeyEvent.KEYCODE_MEDIA_STOP, KeyEvent.KEYCODE_MEDIA_NEXT, KeyEvent.KEYCODE_MEDIA_PREVIOUS,
@@ -33,7 +28,7 @@ class MediaButtonReceiver : BroadcastReceiver() {
         }
         try {
             ContextCompat.startForegroundService(
-                c, Intent(c, RecorderService::class.java).setAction(RecorderService.ACTION_MEDIA_KEY).putExtra("sender", sender)
+                c, Intent(c, RecorderService::class.java).setAction(RecorderService.ACTION_MEDIA_KEY)
             )
         } catch (e: Exception) {
             notifyTapToRecord(c) // Android non ha permesso l'avvio automatico

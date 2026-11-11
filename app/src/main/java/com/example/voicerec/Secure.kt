@@ -34,12 +34,6 @@ object Audio {
     fun slower(c: Context) = p(c).edit().putInt("dn_level", minOf(level(c) + 1, 2)).apply()
     fun armed(c: Context) = p(c).getBoolean("armed", false)
     fun setArmed(c: Context, v: Boolean) = p(c).edit().putBoolean("armed", v).apply()
-    /** App che invia i comandi dell'orologio (Huawei Health). Solo i comandi inviati da lei fanno partire la registrazione. */
-    fun watchPkg(c: Context) = p(c).getString("watch_pkg", "com.huawei.health") ?: "com.huawei.health"
-    fun setWatchPkg(c: Context, v: String) = p(c).edit().putString("watch_pkg", v).apply()
-    fun isWatchPkg(c: Context, pkg: String?) = pkg != null && pkg == watchPkg(c)
-    fun learning(c: Context) = p(c).getBoolean("learning", false)
-    fun setLearning(c: Context, v: Boolean) = p(c).edit().putBoolean("learning", v).apply()
 }
 
 object LockState {

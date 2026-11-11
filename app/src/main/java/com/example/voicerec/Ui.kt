@@ -115,7 +115,6 @@ class Actions(
     val setDenoise: (Boolean) -> Unit,
     val batteryExempt: () -> Unit,
     val openHealthSettings: () -> Unit,
-    val learnWatch: () -> Unit,
     val downloadModel: () -> Unit,
     val transcribe: (File) -> Unit,
     val cancelWork: () -> Unit,
@@ -398,6 +397,7 @@ fun RecordingCard(
     received: Boolean,
     onPlay: () -> Unit,
     onViewTxt: () -> Unit,
+    onEdit: () -> Unit,
     onTranscribe: () -> Unit,
     onExport: () -> Unit,
     onSharePlain: () -> Unit,
@@ -432,6 +432,7 @@ fun RecordingCard(
                 IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, "Altro") }
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                     if (hasTxt) DropdownMenuItem(text = { Text("Vedi trascrizione") }, onClick = { menu = false; onViewTxt() })
+                    if (hasTxt) DropdownMenuItem(text = { Text("Correggi trascrizione") }, onClick = { menu = false; onEdit() })
                     DropdownMenuItem(
                         text = { Text(if (hasTxt) "Rifai trascrizione" else "Trascrivi") },
                         onClick = { menu = false; onTranscribe() }
@@ -467,6 +468,9 @@ fun Home(actions: Actions, importUri: Uri?, clearImport: () -> Unit, onChangePin
 
     var tick by remember { mutableIntStateOf(0) }
     var txtVersion by remember { mutableIntStateOf(0) }
+    var openEdit by remember { mutableStateOf(false) }
+    var showDict by remember { mutableStateOf(false) }
+    var dictVersion by remember { mutableIntStateOf(0) }
     var exempt by remember { mutableStateOf(true) }
     var elapsed by remember { mutableLongStateOf(0L) }
     var toDelete by remember { mutableStateOf<File?>(null) }
@@ -507,6 +511,8 @@ fun Home(actions: Actions, importUri: Uri?, clearImport: () -> Unit, onChangePin
         }
     }
 
+    LaunchedEffect(showTxt) { if (showTxt == null) openEdit = false }
+
     LazyColumn(
         Modifier.fillMaxSize().safeDrawingPadding(),
         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
@@ -525,6 +531,7 @@ fun Home(actions: Actions, importUri: Uri?, clearImport: () -> Unit, onChangePin
                     IconButton(onClick = { topMenu = true }) { Icon(Icons.Default.MoreVert, "Menu") }
                     DropdownMenu(expanded = topMenu, onDismissRequest = { topMenu = false }) {
                         DropdownMenuItem(text = { Text("Importa file protetto") }, onClick = { topMenu = false; actions.pickImport() })
+                        DropdownMenuItem(text = { Text("Dizionario personale") }, onClick = { topMenu = false; showDict = true })
                         DropdownMenuItem(text = { Text("Cambia codice") }, onClick = { topMenu = false; askPin("per cambiare il codice") { onChangePin() } })
                     }
                 }
@@ -555,7 +562,7 @@ fun Home(actions: Actions, importUri: Uri?, clearImport: () -> Unit, onChangePin
                     Column(Modifier.weight(1f)) {
                         Text("Comando dall'orologio", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                         Text(
-                            "Solo l'orologio avvia e ferma la registrazione (play/pausa dalla schermata Musica): i tasti delle cuffie vengono ignorati. Funziona anche con l'app chiusa dalle schede recenti.",
+                            "Sempre attivo, anche con l'app chiusa dalle schede recenti: play/pausa dalla schermata Musica dell'orologio avvia e ferma la registrazione.",
                             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         Text(
@@ -567,7 +574,6 @@ fun Home(actions: Actions, importUri: Uri?, clearImport: () -> Unit, onChangePin
                         }
                         if (armed) {
                             TextButton(onClick = actions.openHealthSettings) { Text("Huawei Health: togli i limiti di batteria") }
-                            TextButton(onClick = actions.learnWatch) { Text("Riconosci l'orologio (poi premi il tasto)") }
                         }
                     }
                     Switch(checked = armed, onCheckedChange = actions.setArmed)
@@ -650,6 +656,7 @@ fun Home(actions: Actions, importUri: Uri?, clearImport: () -> Unit, onChangePin
                         else askPin("per ascoltare la registrazione") { player.toggle(f) }
                     },
                     onViewTxt = { showTxt = f },
+                    onEdit = { openEdit = true; showTxt = f },
                     onTranscribe = {
                         when {
                             !modelReady -> Toast.makeText(ctx, "Scarica prima il modello (in alto)", Toast.LENGTH_LONG).show()
@@ -837,12 +844,57 @@ fun Home(actions: Actions, importUri: Uri?, clearImport: () -> Unit, onChangePin
         }
     }
 
+    if (showDict) {
+        val rules = remember(dictVersion) {
+            Learned.load(ctx).entries.map { it.key to it.value }.sortedByDescending { it.second.count }
+        }
+        Dialog(
+            onDismissRequest = { showDict = false },
+            properties = DialogProperties(usePlatformDefaultWidth = false, securePolicy = SecureFlagPolicy.SecureOn)
+        ) {
+            Surface(Modifier.fillMaxSize()) {
+                Column(Modifier.safeDrawingPadding().padding(16.dp)) {
+                    Text("Dizionario personale", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                    Text(
+                        "Le correzioni che l'app ha imparato dalle tue modifiche. Si applicano da sole nelle nuove trascrizioni " +
+                            "dopo due conferme, o subito se la parola è lunga. Elimina quelle sbagliate.",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Row {
+                        Spacer(Modifier.weight(1f))
+                        TextButton(onClick = { showDict = false }) { Text("Chiudi") }
+                    }
+                    HorizontalDivider()
+                    if (rules.isEmpty()) {
+                        Text("Ancora nessuna correzione. Correggi una trascrizione e l'app inizia a imparare.", Modifier.padding(top = 12.dp))
+                    } else {
+                        LazyColumn(Modifier.weight(1f)) {
+                            items(rules, key = { it.first }) { (k, r) ->
+                                Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    Column(Modifier.weight(1f)) {
+                                        Text("$k  →  ${r.value}", style = MaterialTheme.typography.bodyLarge)
+                                        Text(
+                                            if (r.count >= 2 || k.length >= 6) "Attiva · confermata ${r.count} volte"
+                                            else "In apprendimento: serve ancora una conferma",
+                                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                    TextButton(onClick = { Learned.remove(ctx, k); dictVersion++ }) { Text("Elimina") }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     showTxt?.let { f ->
         val received = Storage.isReceived(f)
         val content = remember(f.absolutePath, done, txtVersion) {
             try { Secure.readText(Storage.txtEnc(f)) } catch (e: Exception) { "Impossibile leggere la trascrizione." }
         }
-        var editing by remember(f) { mutableStateOf(false) }
+        var editing by remember(f) { mutableStateOf(openEdit) }
         var draft by remember(f, txtVersion) { mutableStateOf(content) }
         val learnedCount = remember(txtVersion) { Learned.count(ctx) }
         Dialog(
@@ -855,7 +907,7 @@ fun Home(actions: Actions, importUri: Uri?, clearImport: () -> Unit, onChangePin
                     if (!received) {
                         Text(
                             "Correggi le parole sbagliate: l'app impara dalle tue correzioni e le userà nelle prossime " +
-                                "trascrizioni (correzioni imparate: $learnedCount). Non cambiare il numero di righe.",
+                                "trascrizioni (correzioni imparate: $learnedCount). Puoi anche incollare una trascrizione corretta intera.",
                             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
@@ -877,13 +929,19 @@ fun Home(actions: Actions, importUri: Uri?, clearImport: () -> Unit, onChangePin
                                 Toast.makeText(
                                     ctx,
                                     when {
-                                        n < 0 -> "Salvato. Per far imparare le correzioni non cambiare il numero di righe"
+                                        n < 0 -> "Salvato. Il testo è troppo lungo per imparare: correggi un pezzo alla volta"
                                         n == 0 -> "Salvato"
                                         else -> "Salvato: imparate $n correzioni"
                                     },
                                     Toast.LENGTH_LONG
                                 ).show()
                             }) { Text("Salva") }
+                            TextButton(onClick = {
+                                val cm = ctx.getSystemService(ClipboardManager::class.java)
+                                val t = cm.primaryClip?.getItemAt(0)?.text?.toString()
+                                if (!t.isNullOrBlank()) draft = t
+                                else Toast.makeText(ctx, "Non c'è nessun testo copiato", Toast.LENGTH_SHORT).show()
+                            }) { Text("Incolla") }
                             TextButton(onClick = { editing = false }) { Text("Annulla") }
                         }
                         Spacer(Modifier.weight(1f))
