@@ -129,6 +129,7 @@ class MainActivity : ComponentActivity() {
         window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
         TranscribeState.modelReady.value = ModelStore.isReady(this)
         RecorderState.denoise.value = Audio.denoise(this)
+        RecorderState.sens.value = Audio.sens(this)
         Thread {
             Storage.migrateLegacy(this)
             if (!RecorderState.isRecording.value) Storage.recoverLeftovers(this)
@@ -143,6 +144,7 @@ class MainActivity : ComponentActivity() {
             batteryExempt = { batteryExempt() },
             openHealthSettings = { openHealthSettings() },
             setDenoise = { Audio.setDenoise(this, it); RecorderState.denoise.value = it },
+            setSens = { Audio.setSens(this, it); RecorderState.sens.value = it },
             downloadModel = { work(TranscribeService.ACTION_DOWNLOAD) },
             transcribe = { work(TranscribeService.ACTION_TRANSCRIBE, it.absolutePath) },
             cancelWork = {

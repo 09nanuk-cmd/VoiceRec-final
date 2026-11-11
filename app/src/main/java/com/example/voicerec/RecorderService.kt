@@ -44,6 +44,7 @@ object RecorderState {
     val armed = MutableStateFlow(false) // modalità orologio attiva
     val lastWatchEvent = MutableStateFlow("nessuno")
     val denoise = MutableStateFlow(true)
+    val sens = MutableStateFlow(2)
     val level = MutableStateFlow(0f) // livello del microfono (0..1) per l'indicatore
 }
 

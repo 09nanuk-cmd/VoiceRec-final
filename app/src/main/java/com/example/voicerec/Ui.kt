@@ -54,6 +54,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalIconButton
@@ -113,6 +114,7 @@ class Actions(
     val toggleRecord: () -> Unit,
     val setArmed: (Boolean) -> Unit,
     val setDenoise: (Boolean) -> Unit,
+    val setSens: (Int) -> Unit,
     val batteryExempt: () -> Unit,
     val openHealthSettings: () -> Unit,
     val downloadModel: () -> Unit,
@@ -457,6 +459,7 @@ fun Home(actions: Actions, importUri: Uri?, clearImport: () -> Unit, onChangePin
     val armed by RecorderState.armed.collectAsStateWithLifecycle()
     val lastEvent by RecorderState.lastWatchEvent.collectAsStateWithLifecycle()
     val denoise by RecorderState.denoise.collectAsStateWithLifecycle()
+    val sens by RecorderState.sens.collectAsStateWithLifecycle()
     val level by RecorderState.level.collectAsStateWithLifecycle()
     val modelReady by TranscribeState.modelReady.collectAsStateWithLifecycle()
     val downloading by TranscribeState.downloading.collectAsStateWithLifecycle()
@@ -594,6 +597,20 @@ fun Home(actions: Actions, importUri: Uri?, clearImport: () -> Unit, onChangePin
                         )
                     }
                     Switch(checked = denoise, onCheckedChange = actions.setDenoise)
+                }
+            }
+        }
+        item {
+            SectionCard {
+                Text("Sensibilità per le voci lontane", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                Text(
+                    "Più è alta, più senti anche chi parla piano a 3 metri, ma anche più fruscio. Vale dalla prossima registrazione.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("Normale", "Alta", "Massima").forEachIndexed { i, label ->
+                        FilterChip(selected = sens == i, onClick = { actions.setSens(i) }, label = { Text(label) })
+                    }
                 }
             }
         }

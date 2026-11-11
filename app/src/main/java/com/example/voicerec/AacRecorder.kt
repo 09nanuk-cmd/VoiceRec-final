@@ -154,8 +154,14 @@ class AacRecorder(private val ctx: Context, private val outFile: File, private v
         if (c == null) { cleanup(); return }
         var den: OnlineSpeechDenoiser? = null
         if (denoise) den = try { createDenoiser() } catch (e: Throwable) { null }
-        val pre = Agc(sr, 4500f, 50f, 22f, true)
-        val post = Agc(sr, 4500f, 8f, 12f, false)
+        // livelli per sensibilità: guadagno a riposo e massimo (prima e dopo il filtro del rumore)
+        val s = Audio.sens(ctx)
+        val preRest = floatArrayOf(4f, 10f, 20f)[s.coerceIn(0, 2)]
+        val preMax = floatArrayOf(30f, 60f, 100f)[s.coerceIn(0, 2)]
+        val postRest = floatArrayOf(1f, 2f, 3f)[s.coerceIn(0, 2)]
+        val postMax = floatArrayOf(4f, 10f, 20f)[s.coerceIn(0, 2)]
+        val pre = Agc(sr, 4500f, preMax, 15f, true, preRest)
+        val post = Agc(sr, 4500f, postMax, 10f, false, postRest)
         var outSamples = 0L
         var bypass = false
         try {
@@ -273,9 +279,10 @@ class AacRecorder(private val ctx: Context, private val outFile: File, private v
         private val maxGain: Float,
         private val minGate: Float,
         private val hpf: Boolean,
+        private val rest: Float,
     ) {
         private val blk = sr / 50
-        private var gain = if (hpf) 6f else 1f
+        private var gain = rest
         private var noise = 200f
         private val f = FloatArray(blk)
 
@@ -339,12 +346,16 @@ class AacRecorder(private val ctx: Context, private val outFile: File, private v
             }
             val rms = sqrt(sum / n).toFloat()
             noise = if (rms < noise) rms else noise + (rms - noise) * 0.001f
-            val gate = maxOf(minGate, noise * 1.8f)
+            val gate = maxOf(minGate, noise * 1.4f)
 
             val old = gain
             if (rms > gate) {
+                // c'è una voce sopra il rumore: porta il volume al livello voluto (scende subito, sale in fretta)
                 val desired = (target / rms).coerceIn(if (hpf) 1f else 0.5f, maxGain)
-                gain += (desired - gain) * (if (desired < gain) 0.5f else 0.06f)
+                gain += (desired - gain) * (if (desired < gain) 0.5f else 0.08f)
+            } else {
+                // silenzio: il volume torna al livello di ascolto, così anche una voce lontana e debole parte già amplificata
+                gain += (rest - gain) * 0.02f
             }
             if (peak > 0f && peak * gain > 30000f) gain = 30000f / peak
             val startGain = if (gain < old) gain else old
