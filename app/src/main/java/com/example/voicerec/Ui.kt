@@ -458,6 +458,7 @@ fun Home(actions: Actions, importUri: Uri?, clearImport: () -> Unit, onChangePin
     val started by RecorderState.startedAt.collectAsStateWithLifecycle()
     val armed by RecorderState.armed.collectAsStateWithLifecycle()
     val lastEvent by RecorderState.lastWatchEvent.collectAsStateWithLifecycle()
+    val health by RecorderState.health.collectAsStateWithLifecycle()
     val denoise by RecorderState.denoise.collectAsStateWithLifecycle()
     val sens by RecorderState.sens.collectAsStateWithLifecycle()
     val level by RecorderState.level.collectAsStateWithLifecycle()
@@ -570,6 +571,10 @@ fun Home(actions: Actions, importUri: Uri?, clearImport: () -> Unit, onChangePin
                         )
                         Text(
                             "Ultimo comando ricevuto: $lastEvent",
+                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            "Controllo automatico: $health",
                             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         if (armed && !exempt) {

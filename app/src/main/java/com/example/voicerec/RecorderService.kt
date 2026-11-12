@@ -6,7 +6,10 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.ContentValues
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.IntentFilter
+import androidx.core.content.ContextCompat
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.media.AudioAttributes
@@ -45,6 +48,7 @@ object RecorderState {
     val lastWatchEvent = MutableStateFlow("nessuno")
     val denoise = MutableStateFlow(true)
     val sens = MutableStateFlow(2)
+    val health = MutableStateFlow("in attesa")
     val level = MutableStateFlow(0f) // livello del microfono (0..1) per l'indicatore
 }
 
@@ -140,6 +144,7 @@ class RecorderService : Service() {
         const val ACTION_ARM = "com.example.voicerec.ARM"
         const val ACTION_DISARM = "com.example.voicerec.DISARM"
         const val ACTION_MEDIA_KEY = "com.example.voicerec.MEDIA_KEY"
+        @Volatile var instance: RecorderService? = null
         private const val CHANNEL = "rec"
         private const val NOTIF_ID = 1
     }
@@ -151,6 +156,7 @@ class RecorderService : Service() {
     private var session: MediaSession? = null
     private var recWall = 0L
     private var lastToggle = 0L
+    private var healthReceiver: BroadcastReceiver? = null
     private var silent: AudioTrack? = null
     private var silentThread: Thread? = null
     @Volatile private var silentRun = false
@@ -162,8 +168,8 @@ class RecorderService : Service() {
     private val keepTick = object : Runnable {
         override fun run() {
             if (session != null) {
-                if (lastPlayers >= 2) reassert() // altre app stanno suonando: riprendi la priorità del tasto
-                handler.postDelayed(this, 15000)
+                healthCheck("controllo periodico")
+                handler.postDelayed(this, if (lastPlayers >= 2) 15_000L else 60_000L)
             }
         }
     }
@@ -190,7 +196,16 @@ class RecorderService : Service() {
         return if (session != null) START_STICKY else START_NOT_STICKY
     }
 
+    override fun onCreate() {
+        super.onCreate()
+        instance = this
+        registerHealthReceiver()
+    }
+
     override fun onDestroy() {
+        instance = null
+        try { healthReceiver?.let { unregisterReceiver(it) } } catch (e: Exception) { }
+        healthReceiver = null
         stopSilent()
         unwatchOthers()
         releaseRecorder()
@@ -202,9 +217,73 @@ class RecorderService : Service() {
 
     // ---------- comandi dall'orologio ----------
 
+    private fun senderPackage(): String? =
+        try {
+            if (Build.VERSION.SDK_INT >= 28) session?.currentControllerInfo?.packageName else null
+        } catch (e: Exception) {
+            null
+        }
+
+    /** Controllo automatico: se qualcosa si è fermato (sessione, silenzio, priorità del tasto) lo ripara. */
+    fun healthCheck(reason: String) {
+        handler.post {
+            try {
+                if (!Audio.armed(this)) return@post
+                val notes = ArrayList<String>()
+                if (session == null) {
+                    notes.add("sessione ricreata")
+                    arm()
+                } else {
+                    session?.let { s ->
+                        if (!s.isActive) { s.isActive = true; notes.add("sessione riattivata") }
+                        try { s.setMediaButtonReceiver(mediaButtonPi()) } catch (e: Exception) { }
+                    }
+                    val t = silent
+                    val ok = silentRun && t != null && t.playState == AudioTrack.PLAYSTATE_PLAYING && silentThread?.isAlive == true
+                    if (!ok) {
+                        stopSilent()
+                        startSilent()
+                        notes.add("silenzio riavviato")
+                    }
+                    reassert() // rinnova la priorità del tasto
+                }
+                val time = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
+                RecorderState.health.value = "ok $time ($reason)" + if (notes.isNotEmpty()) " · " + notes.joinToString(", ") else ""
+            } catch (e: Exception) {
+                RecorderState.health.value = "errore nel controllo: " + (e.message ?: e.javaClass.simpleName)
+            }
+            scheduleHealth(this)
+        }
+    }
+
+    private fun registerHealthReceiver() {
+        val r = object : BroadcastReceiver() {
+            override fun onReceive(c: Context?, i: Intent?) {
+                healthCheck(
+                    when (i?.action) {
+                        Intent.ACTION_SCREEN_ON -> "schermo acceso"
+                        Intent.ACTION_USER_PRESENT -> "sblocco"
+                        PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED -> "cambio modalità risparmio"
+                        else -> "evento di sistema"
+                    }
+                )
+            }
+        }
+        val f = IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_ON)
+            addAction(Intent.ACTION_USER_PRESENT)
+            addAction(PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED)
+            addAction(Intent.ACTION_POWER_CONNECTED)
+            addAction(Intent.ACTION_POWER_DISCONNECTED)
+        }
+        ContextCompat.registerReceiver(this, r, f, ContextCompat.RECEIVER_NOT_EXPORTED)
+        healthReceiver = r
+    }
+
     private fun fromWatch(name: String) {
+        val pkg = senderPackage()
         RecorderState.lastWatchEvent.value =
-            name + " " + SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
+            name + (if (pkg != null) " ($pkg) " else " ") + SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
         val now = SystemClock.elapsedRealtime()
         if (now - lastToggle < 1000) return // evita doppi eventi (giù/su del tasto)
         lastToggle = now
@@ -240,7 +319,12 @@ class RecorderService : Service() {
             silentThread = Thread {
                 val zeros = ShortArray(800)
                 while (silentRun) {
-                    try { t.write(zeros, 0, zeros.size) } catch (e: Exception) { break }
+                    try {
+                        if (t.write(zeros, 0, zeros.size) < 0) { silentRun = false; break }
+                    } catch (e: Exception) {
+                        silentRun = false
+                        break
+                    }
                 }
             }.also { it.isDaemon = true; it.start() }
         } catch (e: Exception) {
@@ -270,13 +354,16 @@ class RecorderService : Service() {
                     lastReassert = now
                     reassert()
                 }
+                val prev = lastPlayers
                 lastPlayers = n
+                if (prev >= 2 && n < 2) handler.postDelayed({ reassert() }, 1500) // l'altra app ha smesso: il tasto torna a noi
             }
         }
         am.registerAudioPlaybackCallback(cb, handler)
         playbackCb = cb
         handler.removeCallbacks(keepTick)
-        handler.postDelayed(keepTick, 15000)
+        handler.postDelayed(keepTick, 15_000L)
+        scheduleHealth(this)
     }
 
     private fun unwatchOthers() {
@@ -363,6 +450,7 @@ class RecorderService : Service() {
             goForeground(RecorderState.isRecording.value)
         } catch (e: Exception) {
             dropSession() // la scelta dell'utente resta salvata: si riattiverà all'apertura dell'app
+            notifyReactivate(this)
             leave()
             return
         }

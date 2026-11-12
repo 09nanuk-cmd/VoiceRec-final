@@ -138,6 +138,7 @@ class MainActivity : ComponentActivity() {
         handle(intent)
         // comando dall'orologio sempre attivo: se era acceso, si riattiva all'apertura dell'app
         if (Audio.armed(this) && !RecorderState.armed.value && hasMic()) launchService(svc(RecorderService.ACTION_ARM))
+        RecorderService.instance?.healthCheck("apertura app")
         val actions = Actions(
             toggleRecord = { toggle() },
             setArmed = { setArmed(it) },
