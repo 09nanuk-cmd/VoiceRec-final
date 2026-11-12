@@ -42,7 +42,7 @@ class AacRecorder(private val ctx: Context, private val outFile: File, private v
 
     companion object {
         const val BITRATE_HQ = 64_000
-        const val BITRATE_VOICE = 32_000
+        const val BITRATE_VOICE = 48_000
         private const val MAX_QUEUE = 3000 // 60 secondi di audio in attesa
     }
 
@@ -92,6 +92,13 @@ class AacRecorder(private val ctx: Context, private val outFile: File, private v
             c.start()
             codec = c
             muxer = MediaMuxer(outFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+            // se il telefono lo supporta, "zoom" del microfono verso le voci lontane
+            try {
+                if (android.os.Build.VERSION.SDK_INT >= 29) {
+                    rec.setPreferredMicrophoneFieldDimension(1.0f)
+                }
+            } catch (e: Throwable) {
+            }
             rec.startRecording()
             check(rec.recordingState == AudioRecord.RECORDSTATE_RECORDING) { "Microfono occupato" }
         } catch (e: Exception) {
@@ -139,7 +146,7 @@ class AacRecorder(private val ctx: Context, private val outFile: File, private v
         val mc = OfflineSpeechDenoiserModelConfig(numThreads = 1)
         when (Audio.level(ctx)) {
             0 -> mc.dpdfnet = OfflineSpeechDenoiserDpdfNetModelConfig(model = "dpdfnet4.onnx")
-            1 -> mc.gtcrn = OfflineSpeechDenoiserGtcrnModelConfig(model = "gtcrn_simple.onnx")
+            1 -> mc.dpdfnet = OfflineSpeechDenoiserDpdfNetModelConfig(model = "dpdfnet2.onnx") // più leggero, qualità simile
             else -> return null
         }
         return OnlineSpeechDenoiser(assetManager = ctx.assets, config = OnlineSpeechDenoiserConfig(model = mc))
@@ -164,27 +171,42 @@ class AacRecorder(private val ctx: Context, private val outFile: File, private v
         val post = Agc(sr, 4500f, postMax, 10f, false, postRest)
         var outSamples = 0L
         var bypass = false
+        // Memoria dei campioni "asciutti" (dopo il volume): al segnale filtrato si mescola il 15% dell'originale,
+        // così le voci deboli non vengono mai tagliate del tutto e l'audio non "si interrompe".
+        // Il filtro ritarda il suono di 640 campioni, che qui vengono compensati.
+        val histSize = 8192
+        val hist = ShortArray(histSize)
+        var inCount = 0L
+        var outCount = 0L
+        val wet = 0.85f
+        fun mix(w: FloatArray): ShortArray {
+            val res = ShortArray(w.size)
+            for (i in w.indices) {
+                val d = outCount + i - 640
+                val dry = if (d >= 0 && d < inCount && inCount - d <= histSize) hist[(d % histSize).toInt()].toFloat() else 0f
+                res[i] = (w[i] * 32768f * wet + dry * (1f - wet)).coerceIn(-32768f, 32767f).toInt().toShort()
+            }
+            outCount += w.size
+            return res
+        }
         try {
             while (true) {
                 val blk = queue.poll(100, TimeUnit.MILLISECONDS)
                 if (blk == null) { if (captureDone) break else continue }
                 pre.process(blk, blk.size)
-                if (den != null) {
-                    val lag = queue.size
-                    if (lag > 500) {
-                        if (!bypass) { bypass = true; Audio.slower(ctx) } // troppo lento: salta il filtro e alleggerisci la prossima volta
-                    } else if (lag < 50) {
-                        bypass = false
-                    }
+                for (v in blk) { hist[(inCount % histSize).toInt()] = v; inCount++ }
+                if (den != null && !bypass && queue.size > 1500) {
+                    bypass = true // troppo lento: da qui in poi niente filtro; la prossima volta si usa un modello più leggero
+                    Audio.slower(ctx)
                 }
                 var out = blk
                 if (den != null && !bypass) {
                     val f = FloatArray(blk.size) { blk[it] / 32768f }
-                    out = toShorts(den.run(f, sr).samples)
+                    out = mix(den.run(f, sr).samples)
                 }
                 outSamples = emit(c, out, post, outSamples)
             }
-            den?.let { d -> outSamples = emit(c, toShorts(d.flush().samples), post, outSamples) }
+            if (den != null && !bypass) outSamples = emit(c, mix(den.flush().samples), post, outSamples)
             feed(c, ShortArray(0), 0, outSamples, true)
             drain(c, true)
         } catch (e: Throwable) {
@@ -352,10 +374,10 @@ class AacRecorder(private val ctx: Context, private val outFile: File, private v
             if (rms > gate) {
                 // c'è una voce sopra il rumore: porta il volume al livello voluto (scende subito, sale in fretta)
                 val desired = (target / rms).coerceIn(if (hpf) 1f else 0.5f, maxGain)
-                gain += (desired - gain) * (if (desired < gain) 0.5f else 0.08f)
+                gain += (desired - gain) * (if (desired < gain) 0.5f else 0.06f)
             } else {
                 // silenzio: il volume torna al livello di ascolto, così anche una voce lontana e debole parte già amplificata
-                gain += (rest - gain) * 0.02f
+                gain += (rest - gain) * 0.012f
             }
             if (peak > 0f && peak * gain > 30000f) gain = 30000f / peak
             val startGain = if (gain < old) gain else old
