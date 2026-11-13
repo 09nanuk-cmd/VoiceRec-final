@@ -116,6 +116,7 @@ class Actions(
     val setDenoise: (Boolean) -> Unit,
     val setSens: (Int) -> Unit,
     val batteryExempt: () -> Unit,
+    val askBluetooth: () -> Unit,
     val openHealthSettings: () -> Unit,
     val downloadModel: () -> Unit,
     val transcribe: (File) -> Unit,
@@ -474,6 +475,8 @@ fun Home(actions: Actions, importUri: Uri?, clearImport: () -> Unit, onChangePin
     var txtVersion by remember { mutableIntStateOf(0) }
     var openEdit by remember { mutableStateOf(false) }
     var showDict by remember { mutableStateOf(false) }
+    var showDiag by remember { mutableStateOf(false) }
+    var diagText by remember { mutableStateOf("") }
     var dictVersion by remember { mutableIntStateOf(0) }
     var exempt by remember { mutableStateOf(true) }
     var elapsed by remember { mutableLongStateOf(0L) }
@@ -583,6 +586,11 @@ fun Home(actions: Actions, importUri: Uri?, clearImport: () -> Unit, onChangePin
                         if (armed) {
                             TextButton(onClick = actions.openHealthSettings) { Text("Huawei Health: togli i limiti di batteria") }
                         }
+                        TextButton(onClick = {
+                            actions.askBluetooth()
+                            diagText = Diag.report(ctx)
+                            showDiag = true
+                        }) { Text("Diagnosi: perché si è fermato?") }
                     }
                     Switch(checked = armed, onCheckedChange = actions.setArmed)
                 }
@@ -861,6 +869,38 @@ fun Home(actions: Actions, importUri: Uri?, clearImport: () -> Unit, onChangePin
                     PinSetup(onCancel = { pinAction = null }) { p -> Pin.set(ctx, p); pinAction = null; act() }
                 } else {
                     PinCheck(pinWhy, onCancel = { pinAction = null }) { pinAction = null; act() }
+                }
+            }
+        }
+    }
+
+    if (showDiag) {
+        Dialog(
+            onDismissRequest = { showDiag = false },
+            properties = DialogProperties(usePlatformDefaultWidth = false, securePolicy = SecureFlagPolicy.SecureOn)
+        ) {
+            Surface(Modifier.fillMaxSize()) {
+                Column(Modifier.safeDrawingPadding().padding(16.dp)) {
+                    Text("Diagnosi", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                    Row {
+                        TextButton(onClick = { diagText = Diag.report(ctx) }) { Text("Aggiorna") }
+                        TextButton(onClick = {
+                            val cm = ctx.getSystemService(ClipboardManager::class.java)
+                            cm.setPrimaryClip(ClipData.newPlainText("diagnosi", diagText))
+                            Toast.makeText(ctx, "Testo copiato", Toast.LENGTH_SHORT).show()
+                        }) { Text("Copia") }
+                        TextButton(onClick = actions.batteryExempt) { Text("Batteria") }
+                        Spacer(Modifier.weight(1f))
+                        TextButton(onClick = { showDiag = false }) { Text("Chiudi") }
+                    }
+                    HorizontalDivider()
+                    SelectionContainer(Modifier.weight(1f)) {
+                        Text(
+                            diagText,
+                            Modifier.verticalScroll(rememberScrollState()).padding(vertical = 8.dp),
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
                 }
             }
         }

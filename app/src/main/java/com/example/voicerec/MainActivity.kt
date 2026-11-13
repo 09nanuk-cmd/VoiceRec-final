@@ -86,13 +86,33 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private val btLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+
+    private fun askBluetooth() {
+        if (Build.VERSION.SDK_INT >= 31 &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED
+        ) btLauncher.launch(Manifest.permission.BLUETOOTH_CONNECT)
+    }
+
+    /** La prima volta che si accende il comando, chiede ad Android di non limitare l'app in background. */
+    private fun askBatteryOnce() {
+        val pm = getSystemService(android.os.PowerManager::class.java)
+        if (hasMic() && !pm.isIgnoringBatteryOptimizations(packageName) && !Audio.batteryAsked(this)) {
+            Audio.setBatteryAsked(this)
+            batteryExempt()
+        }
+    }
+
     private fun toggle() {
         if (RecorderState.isRecording.value) startService(svc(RecorderService.ACTION_STOP))
         else requestRun(svc(RecorderService.ACTION_START))
     }
 
     private fun setArmed(on: Boolean) {
-        if (on) requestRun(svc(RecorderService.ACTION_ARM))
+        if (on) {
+            requestRun(svc(RecorderService.ACTION_ARM))
+            askBatteryOnce()
+        }
         else startService(svc(RecorderService.ACTION_DISARM))
     }
 
@@ -124,6 +144,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        CrashLog.install(this)
         enableEdgeToEdge()
         // niente schermate nelle app recenti né screenshot
         window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
@@ -143,6 +164,7 @@ class MainActivity : ComponentActivity() {
             toggleRecord = { toggle() },
             setArmed = { setArmed(it) },
             batteryExempt = { batteryExempt() },
+            askBluetooth = { askBluetooth() },
             openHealthSettings = { openHealthSettings() },
             setDenoise = { Audio.setDenoise(this, it); RecorderState.denoise.value = it },
             setSens = { Audio.setSens(this, it); RecorderState.sens.value = it },

@@ -103,6 +103,7 @@ class HealthReceiver : BroadcastReceiver() {
             return
         }
         RecorderState.health.value = "servizio chiuso da Android: riavvio"
+        Crumbs.add(c, "allarme: il servizio era chiuso, provo a riavviarlo")
         try {
             ContextCompat.startForegroundService(
                 c, Intent(c, RecorderService::class.java).setAction(RecorderService.ACTION_ARM)

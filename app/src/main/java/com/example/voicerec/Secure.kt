@@ -36,6 +36,8 @@ object Audio {
     fun setSens(c: Context, v: Int) = p(c).edit().putInt("sens", v).apply()
     fun slower(c: Context) = p(c).edit().putInt("dn_level", minOf(level(c) + 1, 2)).apply()
     fun armed(c: Context) = p(c).getBoolean("armed", false)
+    fun batteryAsked(c: Context) = p(c).getBoolean("bat_asked", false)
+    fun setBatteryAsked(c: Context) = p(c).edit().putBoolean("bat_asked", true).apply()
     fun setArmed(c: Context, v: Boolean) = p(c).edit().putBoolean("armed", v).apply()
 }
 

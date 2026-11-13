@@ -199,10 +199,23 @@ class RecorderService : Service() {
     override fun onCreate() {
         super.onCreate()
         instance = this
+        CrashLog.install(this)
+        Crumbs.add(this, "servizio avviato")
         registerHealthReceiver()
     }
 
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        Crumbs.add(this, "app chiusa dalle schede recenti (il servizio continua)")
+        super.onTaskRemoved(rootIntent)
+    }
+
+    override fun onTrimMemory(level: Int) {
+        Crumbs.add(this, "Android chiede memoria (livello $level)")
+        super.onTrimMemory(level)
+    }
+
     override fun onDestroy() {
+        Crumbs.add(this, "servizio fermato")
         instance = null
         try { healthReceiver?.let { unregisterReceiver(it) } } catch (e: Exception) { }
         healthReceiver = null
@@ -249,6 +262,7 @@ class RecorderService : Service() {
                 }
                 val time = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
                 RecorderState.health.value = "ok $time ($reason)" + if (notes.isNotEmpty()) " · " + notes.joinToString(", ") else ""
+                if (notes.isNotEmpty()) Crumbs.add(this, "controllo: " + notes.joinToString(", "))
             } catch (e: Exception) {
                 RecorderState.health.value = "errore nel controllo: " + (e.message ?: e.javaClass.simpleName)
             }
@@ -284,6 +298,7 @@ class RecorderService : Service() {
         val pkg = senderPackage()
         RecorderState.lastWatchEvent.value =
             name + (if (pkg != null) " ($pkg) " else " ") + SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
+        Crumbs.add(this, "comando: " + RecorderState.lastWatchEvent.value)
         val now = SystemClock.elapsedRealtime()
         if (now - lastToggle < 1000) return // evita doppi eventi (giù/su del tasto)
         lastToggle = now
@@ -317,7 +332,7 @@ class RecorderService : Service() {
             t.play()
             silentRun = true
             silentThread = Thread {
-                val zeros = ShortArray(800)
+                val zeros = ShortArray(8000) // 1 secondo alla volta: meno risvegli del processore
                 while (silentRun) {
                     try {
                         if (t.write(zeros, 0, zeros.size) < 0) { silentRun = false; break }
@@ -510,6 +525,8 @@ class RecorderService : Service() {
         try {
             goForeground(true)
         } catch (e: Exception) {
+            Crumbs.add(this, "ERRORE: microfono non avviabile da background (" + e.javaClass.simpleName + ")")
+            notifyTapToRecord(this) // un tocco sulla notifica avvia la registrazione
             if (session == null) leave()
             return
         }
@@ -611,6 +628,7 @@ class RecorderService : Service() {
             ServiceCompat.startForeground(this, NOTIF_ID, buildNotification(recording), type)
         } catch (e: Exception) {
             // riavvio dal sistema in background: senza microfono si resta comunque in ascolto dell'orologio
+            Crumbs.add(this, "avvio senza microfono (consentito solo con l'app aperta)")
             if (session != null && !recording) {
                 ServiceCompat.startForeground(
                     this, NOTIF_ID, buildNotification(false), ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
